@@ -1,0 +1,22 @@
+ssh -Y cwkj@192.168.0.100
+
+激活环境变量：
+source ~/cwkj_ws/devel/setup.bash
+source ~/my_ws/devel/setup.bash
+
+启动PX4/MAVROS/语音/雷达、视觉节点、主控：
+roslaunch offboard_circle_modified px4_mavros.launch
+（USB）
+roslaunch offboard_circle_modified vision_object_position.launch
+（D435）
+roslaunch offboard_circle_modified vision_object_position_depth.launch
+roslaunch offboard_circle_modified offboard_circle_modified.launch
+
+启动主控前检查：
+rostopic echo /mavros/state
+rostopic echo /mavros/local_position/odom
+rostopic echo /object_position
+
+检查d435从图象-推理能正常运行：
+roslaunch realsense2_camera rs_camera.launch
+roslaunch yolov8_ros yolo_v8_d435.launch

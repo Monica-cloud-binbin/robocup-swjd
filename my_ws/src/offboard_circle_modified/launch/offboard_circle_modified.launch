@@ -1,0 +1,95 @@
+<?xml version="1.0"?>
+<launch>
+    <!--
+      mission 坐标系：原点为起飞前首次有效里程计位置，x 向初始机头前方，y 向左，z 向上。
+      现场标定只修改本文件。黄色/红色气球坐标必须填“安全搜索点/球心”的实测值。
+    -->
+    <node pkg="offboard_circle_modified" type="offboard_circle_modified"
+          name="offboard_circle_modified" output="screen">
+
+        <!-- ===== 基础飞行与现场坐标（米） ===== -->
+        <param name="ALTITUDE" type="double" value="1.68" />
+
+        <!-- 兼容旧代码：position_x/y 仍表示卫星相对起飞点坐标。 -->
+        <param name="position_x" type="double" value="2.01" />
+        <param name="position_y" type="double" value="-2.25" />
+        <param name="satellite_x" type="double" value="2.01" />
+        <param name="satellite_y" type="double" value="-2.25" />
+        <param name="satellite_z" type="double" value="1.68" />
+
+        <!-- 黄色坐标按安全搜索点标定，不要把默认值直接用于实机。 -->
+        <param name="yellow_balloon_x" type="double" value="4.00" />
+        <param name="yellow_balloon_y" type="double" value="-2.00" />
+        <param name="yellow_balloon_z" type="double" value="1.68" />
+
+        <!-- 红色气球球心坐标；当前版本只用于离线生成固定绕行曲线。 -->
+        <param name="red_balloon_x" type="double" value="3.00" />
+        <param name="red_balloon_y" type="double" value="-1.00" />
+        <param name="red_balloon_z" type="double" value="1.68" />
+
+        <!-- ===== 黑环反馈控制（保留旧控制器） ===== -->
+        <param name="Kp_fast" type="double" value="0.00035" />
+        <param name="Kp_slow" type="double" value="0.00020" />
+        <param name="Kp" type="double" value="0.0025" />
+        <param name="Kd" type="double" value="0.0003" />
+        <param name="aspect_threshold" type="double" value="1.1" />
+        <param name="delta_omega" type="double" value="0.05" />
+        <param name="omega_base" type="double" value="0.116" />
+
+        <!-- 保留原深度接口参数；当前任务状态切换不强制依赖深度。 -->
+        <param name="depth_target" type="double" value="0.385" />
+        <param name="Kp_depth" type="double" value="1.0" />
+
+        <param name="ring_target_x_min" type="double" value="245.0" />
+        <param name="ring_target_x_max" type="double" value="370.0" />
+        <param name="ring_detect_count_required" type="int" value="6" />
+        <param name="ring_message_timeout" type="double" value="0.5" />
+        <param name="satellite_vision_loss_timeout" type="double" value="2.0" />
+        <param name="satellite_search_timeout" type="double" value="60.0" />
+
+        <!--
+          半径指机体中心轨迹到卫星圆心的距离。必须结合机体尺寸、保护罩/对接装置和现场测试标定。
+          旧实测值留作回退：R_circle_0=1.7, R_circle_1=0.95,
+          R_circle_2=0.95, R_circle_3=0.9, R_circle_4=1.5。
+        -->
+        <param name="R_satellite_search" type="double" value="1.70" />
+        <param name="R_satellite_capture" type="double" value="0.95" />
+        <param name="R_satellite_orbit" type="double" value="0.95" />
+        <param name="R_satellite_exit" type="double" value="1.50" />
+        <param name="satellite_capture_duration" type="double" value="12.0" />
+        <param name="satellite_orbit_duration" type="double" value="12.0" />
+
+        <!-- ===== 黄色气球预留接口 /yellow_balloon_position =====
+             PointStamped.point.x = 水平中心像素
+             PointStamped.point.y = 垂直中心像素
+             PointStamped.point.z = 黄色面积占整幅图像比例，严格使用 0.0~1.0
+        -->
+        <param name="yellow_target_x" type="double" value="320.0" />
+        <param name="yellow_center_tolerance" type="double" value="30.0" />
+        <param name="yellow_detect_count_required" type="int" value="3" />
+        <param name="yellow_message_timeout" type="double" value="0.5" />
+        <param name="yellow_area_slow_threshold" type="double" value="0.10" />
+        <param name="yellow_area_contact_threshold" type="double" value="0.25" />
+        <param name="yellow_search_yaw_rate" type="double" value="0.20" />
+        <param name="yellow_yaw_kp" type="double" value="0.002" />
+        <param name="yellow_approach_speed" type="double" value="0.25" />
+        <param name="yellow_slow_approach_speed" type="double" value="0.08" />
+        <param name="yellow_contact_spin_rate" type="double" value="0.80" />
+        <param name="yellow_contact_spin_duration" type="double" value="5.0" />
+        <param name="yellow_contact_forward_speed" type="double" value="0.0" />
+        <param name="yellow_loss_return_timeout" type="double" value="1.0" />
+        <param name="yellow_search_timeout" type="double" value="60.0" />
+        <param name="yellow_approach_timeout" type="double" value="30.0" />
+
+        <!-- ===== 三个航段的人工绕行模式：NONE / LEFT / RIGHT ===== -->
+        <param name="start_to_satellite_hook" type="string" value="NONE" />
+        <param name="satellite_to_yellow_hook" type="string" value="NONE" />
+        <param name="yellow_to_home_hook" type="string" value="NONE" />
+
+        <!-- safe_radius 是机体中心轨迹到红球中心的水平距离；arc_step 单位为弧度。 -->
+        <param name="hook_safe_radius" type="double" value="1.00" />
+        <param name="hook_arc_step" type="double" value="0.15" />
+        <param name="waypoint_tolerance" type="double" value="0.20" />
+        <param name="transit_timeout" type="double" value="60.0" />
+    </node>
+</launch>

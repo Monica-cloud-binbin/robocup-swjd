@@ -1,0 +1,7 @@
+<launch>
+    <!-- 全局的 test_param -->
+    <param name="object_name" value="landing" />
+
+    <node name='object_position' pkg="object_position" type="object_position" output="screen" />
+
+</launch>
