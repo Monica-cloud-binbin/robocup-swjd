@@ -25,6 +25,10 @@
           name="offboard_circle_modified"
           output="screen">
 
+        <!-- Must exactly match the class names stored in the YOLO .pt model. -->
+        <param name="satellite_class_name" type="string" value="" />
+        <param name="yellow_balloon_class_name" type="string" value="" />
+
         <!-- ================= 基础飞行参数 ================= -->
         <param name="ALTITUDE" type="double" value="1" />
 

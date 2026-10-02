@@ -1,0 +1,77 @@
+<?xml version="1.0"?>
+<launch>
+    <!--
+      mission_mode:
+        1 = takeoff -> avoidance to test target -> hold
+        2 = takeoff -> avoidance to yellow area -> yellow task -> avoidance home
+        3 = takeoff -> satellite task -> avoidance to yellow area
+            -> yellow task -> avoidance home
+
+      Every x/y/z mission value below is an offset in metres from the first
+      valid /mavros/local_position/odom pose captured before takeoff.
+      These values are test defaults and must be tuned for the actual field.
+    -->
+    <arg name="mission_mode" default="1" />
+    <arg name="satellite_class_name" default="" />
+    <arg name="yellow_balloon_class_name" default="" />
+
+    <node pkg="offboard_circle_modified"
+          type="offboard_test_base"
+          name="offboard_test_base"
+          output="screen">
+        <param name="mission_mode" type="int" value="$(arg mission_mode)" />
+        <param name="auto_land_after_mission" type="bool" value="false" />
+        <param name="ALTITUDE" type="double" value="1.2" />
+
+        <!-- Exact YOLO model labels. Mode 1 does not require either value. -->
+        <param name="satellite_class_name" type="string"
+               value="$(arg satellite_class_name)" />
+        <param name="yellow_balloon_class_name" type="string"
+               value="$(arg yellow_balloon_class_name)" />
+
+        <!-- Mode 1 destination, relative to takeoff origin. -->
+        <param name="test_goal_x" type="double" value="4.3" />
+        <param name="test_goal_y" type="double" value="3.9" />
+
+        <!-- Yellow task staging point, relative to takeoff origin. -->
+        <param name="yellow_balloon_x" type="double" value="4.3" />
+        <param name="yellow_balloon_y" type="double" value="3.9" />
+        <param name="yellow_balloon_altitude" type="double" value="1.2" />
+
+        <!-- Satellite center, relative to takeoff origin. -->
+        <param name="satellite_x" type="double" value="4.0" />
+        <param name="satellite_y" type="double" value="0.0" />
+
+        <!-- One fixed obstacle used by every avoidance leg. -->
+        <param name="obstacle_x" type="double" value="1.8" />
+        <param name="obstacle_y" type="double" value="3.9" />
+        <param name="obstacle_safe_distance" type="double" value="1.0" />
+        <param name="avoidance_orbit_angle_deg" type="double" value="180.0" />
+        <param name="avoidance_orbit_angular_speed" type="double" value="0.10" />
+        <param name="avoidance_orbit_direction" type="int" value="1" />
+        <param name="arrive_tolerance" type="double" value="0.12" />
+        <param name="orbit_tracking_tolerance" type="double" value="0.25" />
+
+        <!-- Satellite logic migrated from the current formal controller. -->
+        <param name="satellite_image_center_x" type="double" value="320.0" />
+        <param name="satellite_kp_fast" type="double" value="0.00035" />
+        <param name="satellite_kp_slow" type="double" value="0.00020" />
+        <param name="satellite_kd" type="double" value="0.0003" />
+        <param name="satellite_aspect_threshold" type="double" value="1.1" />
+        <param name="satellite_delta_omega" type="double" value="0.05" />
+        <param name="satellite_search_radius" type="double" value="1.4" />
+        <param name="satellite_orbit_radius" type="double" value="0.8" />
+        <param name="satellite_omega_base" type="double" value="0.116" />
+        <param name="satellite_orbit_radius_tolerance" type="double" value="0.10" />
+        <param name="satellite_orbit_duration" type="double" value="10.0" />
+        <param name="satellite_detection_timeout" type="double" value="0.5" />
+        <param name="satellite_detection_count_required" type="int" value="6" />
+
+        <!-- First yellow-module implementation: fresh, centered detections. -->
+        <param name="yellow_image_center_x" type="double" value="320.0" />
+        <param name="yellow_image_center_y" type="double" value="240.0" />
+        <param name="yellow_pixel_tolerance" type="double" value="60.0" />
+        <param name="yellow_detection_timeout" type="double" value="0.5" />
+        <param name="yellow_detection_count_required" type="int" value="5" />
+    </node>
+</launch>

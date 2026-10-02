@@ -10,6 +10,7 @@ add_compile_options(-std=c++11)
 find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   mavros_msgs
+  my_object_position
   nav_msgs
   roscpp
   std_msgs
@@ -109,7 +110,7 @@ find_package(catkin REQUIRED COMPONENTS
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES offboard_pkg
-  CATKIN_DEPENDS geometry_msgs mavros_msgs nav_msgs roscpp std_msgs std_srvs tf
+  CATKIN_DEPENDS geometry_msgs mavros_msgs my_object_position nav_msgs roscpp std_msgs std_srvs tf
 #  DEPENDS system_lib
 )
 
@@ -120,7 +121,7 @@ catkin_package(
 ## Specify additional locations of header files
 ## Your package locations should be listed before other locations
 include_directories(
-# include
+  include
   ${catkin_INCLUDE_DIRS}
 )
 
@@ -210,4 +211,17 @@ include_directories(
 # catkin_add_nosetests(test)
 
 add_executable(offboard_circle_modified src/offboard_circle_modified.cpp)
+add_dependencies(offboard_circle_modified ${catkin_EXPORTED_TARGETS})
 target_link_libraries(offboard_circle_modified ${catkin_LIBRARIES})
+
+add_executable(offboard_obstacle_test src/offboard_obstacle_test.cpp)
+target_link_libraries(offboard_obstacle_test ${catkin_LIBRARIES})
+
+add_executable(offboard_test_base
+  src/offboard_test_base.cpp
+  src/satellite_task.cpp
+  src/avoidance_task.cpp
+  src/yellow_balloon_task.cpp
+)
+add_dependencies(offboard_test_base ${catkin_EXPORTED_TARGETS})
+target_link_libraries(offboard_test_base ${catkin_LIBRARIES})

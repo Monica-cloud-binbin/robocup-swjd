@@ -4,12 +4,12 @@
 
 ## 启动组合与节点
 
-通常分别启动以下三组；USB 和 D435 视觉组二选一，不能同时按默认配置启动（两者使用相同的 YOLO、位置转换和黄球节点名/输出话题）。S1-F290 的已知实机清单是普通 USB 摄像头、宇树 L1 和 PX4，没有 D435；D435 组仅供配有该相机的测试环境参考。
+通常分别启动以下三组；USB 和 D435 视觉组不能同时启动，因为两者会占用相同的 YOLO 和位置转换节点名/输出话题。S1-F290 的已知实机清单是普通 USB 摄像头、宇树 L1 和 PX4，没有 D435；当前有效链路固定为 USB 组，D435 组仅保留作历史测试参考。
 
 | 启动入口 | 明确启动的 ROS 节点 | 来源与边界 |
 | --- | --- | --- |
 | [`px4_mavros.launch`](my_ws/src/offboard_circle_modified/launch/px4_mavros.launch) | MAVROS（通常 `/mavros`）、`/laserMapping`、`/tf_pub_1`、`/tf_pub_2`、`/unitree_l1_to_mavros`、`/soundplay_node`、`/voice_server` | 逐层 include 商家 `robot_bringup/launch/px4.launch`、`test_location.launch`、`unitree_lidar_ros` 驱动及本仓库 [`voice.launch`](my_ws/src/my_voice/launch/voice.launch)。雷达驱动、Point-LIO 附加转换节点的具体名称见下文“待核对”。PX4 飞控本身不是 ROS 节点。 |
-| [`vision_object_position.launch`](my_ws/src/offboard_circle_modified/launch/vision_object_position.launch) | `/usb_cam`、`/yolov8_ros`、`/my_object_position`、`/yellow_detector` | USB 摄像头和 YOLO 的 launch 来自商家 `usb_cam`、`yolov8_ros`；位置转换和黄球检测源码在 `my_ws`。 |
+| [`vision_object_position.launch`](my_ws/src/offboard_circle_modified/launch/vision_object_position.launch) | `/usb_cam`、`/yolov8_ros`、`/my_object_position` | USB 摄像头和 YOLO 的 launch 来自商家 `usb_cam`、`yolov8_ros`；`my_object_position` 统一完成置信度过滤和检测框数据转换。卫星与黄气球共用这一条视觉链。 |
 | [`vision_object_position_depth.launch`](my_ws/src/offboard_circle_modified/launch/vision_object_position_depth.launch) | `/d435/realsense2_camera_manager`、`/d435/realsense2_camera`、`/yolov8_ros`、`/my_object_position`、`/yellow_detector` | D435 的 nodelet manager/camera、YOLO 来自商家包；此入口**没有启动** `depth_object_position`。RealSense 可能还加载内部组件。 |
 | [`offboard_circle_modified.launch`](my_ws/src/offboard_circle_modified/launch/offboard_circle_modified.launch) | `/offboard_circle_modified` | 主控可执行程序来自 [`offboard_circle_modified.cpp`](my_ws/src/offboard_circle_modified/src/offboard_circle_modified.cpp)。launch 的 `name` 覆盖源码 `ros::init` 使用的默认名字。 |
 
@@ -26,10 +26,9 @@ flowchart LR
   MAVROS -->|/mavros/state; /mavros/local_position/odom| Main[/offboard_circle_modified]
   Main -->|/mavros/setpoint_position/local; arming; set_mode| MAVROS
   Cam[USB 摄像头 /usb_cam] -->|/usb_cam/image_raw| Yolo[/yolov8_ros]
-  Cam -->|/usb_cam/image_raw| Yellow[/yellow_detector]
   Yolo -->|/yolov8/BoundingBoxes| Convert[/my_object_position]
-  Convert -->|/object_position| Main
-  Yellow -->|/yellow_balloon_position| Main
+  Convert -->|/object_detection| Main
+  Convert -.->|/object_position 旧兼容接口| Legacy[旧主控/调试节点]
   Main -->|/play4| Voice[/voice_server] --> Sound[/soundplay_node]
 ```
 
@@ -54,26 +53,25 @@ flowchart LR
 
 | 发布者 | 话题 | ROS 类型 | 消费者 / 数据含义 |
 | --- | --- | --- | --- |
-| `/usb_cam` | `/usb_cam/image_raw` | `sensor_msgs/Image` | YOLO 和黄球节点同时订阅。商家 `usb_cam/launch/usb_cam-test.launch` 配置 `/dev/video0`、640x480、30 fps；驱动还发布相机信息。 |
+| `/usb_cam` | `/usb_cam/image_raw` | `sensor_msgs/Image` | `/yolov8_ros` 订阅。商家 `usb_cam/launch/usb_cam-test.launch` 配置 `/dev/video0`、640x480、30 fps；驱动还发布相机信息。 |
 | `/yolov8_ros` | `/yolov8/BoundingBoxes` | `yolov8_ros_msgs/BoundingBoxes` | `/my_object_position` 订阅；YOLO 的 `image_topic`、`pub_topic` 在商家 `yolo_v8.launch` 中配置。消息包含 `bounding_boxes[]`，各框有 `Class`、`probability`、`xmin/ymin/xmax/ymax`。 |
-| `/my_object_position` | `/object_position` | `geometry_msgs/PointStamped` | 主控订阅。仅取 YOLO **第一个框**，要求其概率 >= 0.8，不按类别筛选；`point.x/y` 是框中心**像素**，`point.z` 是 `int(框高/框宽 * 100)`。主控将 z 除以 100 用作宽高比。没有合格框时不发布。 |
-| `/yellow_detector` | `/yellow_balloon_position` | `geometry_msgs/PointStamped` | 主控订阅。`point.x/y` 是框中心**像素**，`point.z` 是黄色轮廓面积 / 整幅图像像素数（0～1）；当前检测器只在最近 5 帧至少 4 帧合格且当前帧合格时发布，即调试图中的绿框。主控还要求连续收到 3 条新消息才进入逼近，默认 0.5 秒无更新则视为过期。 |
-| `/yellow_detector` | `/yellow_detector/detection` | `yellow_detector/YellowBalloonDetection` | 附加完整检测结果，**主控未订阅**。当前源码仅在绿框确认时发布；橙框和无目标不发送 `detected=false`。修改此消息需同步 `.msg`、CMake/依赖并重新编译。 |
-| YOLO / 黄球节点 | `/yolov8/detection_image` / `/yellow_detector/debug_image` | `sensor_msgs/Image` | 供 `rqt_image_view` 调试，不是主控的控制接口。 |
+| `/my_object_position` | `/object_detection` | `my_object_position/ObjectDetection` | 当前主控的统一视觉接口。转换节点遍历 YOLO 检测框，丢弃低于 `~confidence_threshold`（默认 0.8）及尺寸无效的框，并逐框发布类别、置信度、边界框、中心像素、宽高比和框面积占整幅图像的比例。主控按 launch 中配置的类别名区分卫星与黄气球。 |
+| `/my_object_position` | `/object_position` | `geometry_msgs/PointStamped` | 为旧主控保留的兼容接口；每帧只发布第一个通过过滤的框，`point.x/y` 是中心像素，`point.z` 是 `框高/框宽 * 100`。当前主控不再订阅此话题。 |
+| `/yolov8_ros` | `/yolov8/detection_image` | `sensor_msgs/Image` | 供图像调试，不是主控的控制接口。 |
 
-黄球检测器源码见 [`yellow_detector_node.py`](my_ws/src/yellow_detector/scripts/yellow_detector_node.py)，消息定义见 [`YellowBalloonDetection.msg`](my_ws/src/yellow_detector/msg/YellowBalloonDetection.msg)。`/object_position` 的像素/比例约定来自 [`my_object_position.cpp`](my_ws/src/my_object_positon/src/my_object_position.cpp)。`/yellow_detector/detection` 的消息类型在终端读取前必须已在对应 ROS 工作空间编译并 source。
+统一转换节点源码见 [`my_object_position.cpp`](my_ws/src/my_object_positon/src/my_object_position.cpp)，消息定义见 [`ObjectDetection.msg`](my_ws/src/my_object_positon/msg/ObjectDetection.msg)。新增消息后必须在对应 ROS 工作空间重新编译并 source。旧 `yellow_detector` 包仍保留在源码树中，但 `vision_object_position.launch` 和当前主控已不再使用它。
 
 ### D435 替代视觉链
 
-`vision_object_position_depth.launch` 选择商家 `realsense2_camera/rs_camera.launch`，其 `camera` 参数默认 `d435`，所以本组合使用 `/d435/color/image_raw`；商家 `yolo_v8_d435.launch` 也订阅它，向相同的 `/yolov8/BoundingBoxes` 发布，`my_object_position` 仍将结果转为 `/object_position`。黄球节点改订阅 `/d435/color/image_raw`，对主控仍发布 `/yellow_balloon_position`。RealSense 深度流虽然默认启用，但这条启动链没有使用深度来控制主任务。
+`vision_object_position_depth.launch` 选择商家 `realsense2_camera/rs_camera.launch`，其 `camera` 参数默认 `d435`，所以本组合使用 `/d435/color/image_raw`；商家 `yolo_v8_d435.launch` 也订阅它，向相同的 `/yolov8/BoundingBoxes` 发布。该 D435 启动文件尚未按新的 `/object_detection` 单视觉接口清理，且实机清单没有 D435，因此不能把它当作当前可用链路。
 
 主控源码也订阅 `/depth_object_position`（`geometry_msgs/PointStamped`），但其回调目前只保存 z 值，后续任务逻辑没有读取该变量。两套视觉组合都**没有启动** [`depth_object_position`](my_ws/src/depth_object_position/src/depth_object_position.cpp)。若将来接入，该节点源码当前还存在接口不一致：订阅 `/yolov8/camera_2/BoundingBoxes`，而上述 D435 YOLO 默认发 `/yolov8/BoundingBoxes`；订阅 `/d435/aligned_depth_to_color/image_raw`，而上述 RealSense launch 默认 `align_depth=false`；并且将 `/depth_object_position` 声明为 `PointStamped`，实际发布对象却是 `PoseStamped`。应先修正并在机载验证，不能把它算作当前可用输入。
 
 ## 新节点接入前核对
 
-1. 区分图像像素、面积比例、本地里程计米数和姿态；不要把 `/object_position` 或 `/yellow_balloon_position` 的 x/y 当作世界坐标。
+1. 区分图像像素、检测框面积比例、本地里程计米数和姿态；`/object_detection` 的 `center_x/center_y` 是图像像素，不能当作世界坐标。
 2. 需要改变无人机运动时，先明确由主控统一发布 `/mavros/setpoint_position/local`，还是设计经主控仲裁的新接口；当前主控源码没有避障输入或仲裁接口。`my_mid360_obstacle_detector` 虽在 `my_ws/src`，上述启动文件均未 include 它，不能把它当作宇树 L1 已接通的避障链。
 3. 不要把 `robot_bringup/test_location.launch` 中的“Livox AVIA”旧注释当作机型证据。宇树驱动、Point-LIO 和点云转扫描的具体话题名需在部署环境确认，特别是计划新增避障订阅时。
-4. 在机载电脑分别核对 `rosnode list`、`rostopic info /pointlio/odom`、`rostopic info /object_position`、`rostopic info /yellow_balloon_position`、`rostopic info /mavros/setpoint_position/local`、`rosservice info /play4` 以及相关话题的 `rostopic type`/`rostopic hz`。本文件只核对了主机源码，没有声称已经验证机载实时拓扑。
+4. 在机载电脑分别核对 `rosnode list`、`rostopic info /pointlio/odom`、`rostopic info /yolov8/BoundingBoxes`、`rostopic info /object_detection`、`rostopic info /mavros/setpoint_position/local`、`rosservice info /play4` 以及相关话题的 `rostopic type`/`rostopic hz`。本文件只核对了主机源码，没有声称已经验证机载实时拓扑。
 
 商家参考路径均相对于仓库根目录的 `important pkg on cwkj_ws`，该目录被 `.gitignore` 排除，远端读者需另取商家包。相应源码主要有 `robot_bringup/launch/{px4,test_location}.launch`、`usb_cam/launch/usb_cam-test.launch`、`yolov8_ros/yolov8_ros/launch/{yolo_v8,yolo_v8_d435}.launch`、`realsense-ros/realsense2_camera/launch/rs_camera.launch` 和 `unitree_l1_to_mavros/src/unitree_l1_to_mavros.cpp`。

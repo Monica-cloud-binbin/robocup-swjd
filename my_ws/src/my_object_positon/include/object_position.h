@@ -15,6 +15,7 @@
 #include "tf/transform_datatypes.h"
 #include "tf/transform_listener.h"
 #include <yolov8_ros_msgs/BoundingBoxes.h>
+#include <my_object_position/ObjectDetection.h>
 
 using namespace cv;
 using namespace std;
@@ -31,6 +32,11 @@ private:
     ros::Subscriber camera_info_sub_; // subscribe the topic, which pubbed by depth image
     
     ros::Publisher position_pub;
+    ros::Publisher detection_pub;
+
+    double confidence_threshold_;
+    int image_width_;
+    int image_height_;
 
     ros::Subscriber local_pos_sub;
 

@@ -1,0 +1,25 @@
+<launch>
+    <!-- Fixed-coordinate obstacle test; run only after MAVROS and localization are ready. -->
+    <node pkg="offboard_circle_modified" type="offboard_obstacle_test"
+          name="offboard_obstacle_test" output="screen">
+        <!-- All coordinates are offsets from the first valid local odometry pose. -->
+        <param name="ALTITUDE" type="double" value="1.2" />
+        <param name="obstacle_x" type="double" value="1.8" />
+        <param name="obstacle_y" type="double" value="3.9" />
+        <param name="goal_x" type="double" value="4.3" />
+        <param name="goal_y" type="double" value="3.9" />
+        <param name="obstacle_safe_distance" type="double" value="1.0" />
+        <param name="orbit_angle_deg" type="double" value="180.0" />
+        <param name="orbit_angular_speed" type="double" value="0.10" />
+        <param name="orbit_direction" type="int" value="1" />
+        <param name="arrive_tolerance" type="double" value="0.12" />
+        <param name="orbit_tracking_tolerance" type="double" value="0.25" />
+
+        <!-- Default test behavior: hold at the goal for inspection. Enable both
+             switches only after the outbound path has been checked safely. -->
+        <param name="goal_hold_time" type="double" value="3.0" />
+        <param name="return_home_after_goal" type="bool" value="false" />
+        <param name="land_hold_time" type="double" value="3.0" />
+        <param name="auto_land" type="bool" value="false" />
+    </node>
+</launch>

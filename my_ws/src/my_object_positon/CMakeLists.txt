@@ -21,6 +21,16 @@ find_package(catkin REQUIRED COMPONENTS
 # Add Boost package if needed (if you're not using Boost, you can remove this line)
 find_package(Boost REQUIRED)
 
+add_message_files(
+  FILES
+  ObjectDetection.msg
+)
+
+generate_messages(
+  DEPENDENCIES
+  std_msgs
+)
+
 # Declare catkin package
 catkin_package(
   CATKIN_DEPENDS roscpp std_msgs message_runtime tf sensor_msgs cv_bridge image_transport geometry_msgs yolov8_ros_msgs  # Add darknet_ros_msgs as a dependency
@@ -40,21 +50,10 @@ link_directories(${catkin_LIB_DIRS})
 
 # Add executable
 add_executable(my_object_position src/my_object_position.cpp)
+add_dependencies(my_object_position ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 # Link libraries to your executable
 target_link_libraries(my_object_position
   ${catkin_LIBRARIES}
   ${OpenCV_LIBRARIES}
 )
-
-# If you have any message or service files, ensure they are generated here (uncomment if used)
-# add_message_files(
-#   FILES
-#   YourMessage.msg
-# )
-
-# Uncomment the following to generate messages if you have message files
-# generate_messages(
-#   DEPENDENCIES
-#   std_msgs
-# )

@@ -16,8 +16,8 @@
 #include <tf/transform_listener.h>
 #include <nav_msgs/Odometry.h>
 #include <mavros_msgs/CommandLong.h>   
-#include <yolov8_ros_msgs/BoundingBoxes.h>
 #include <std_srvs/Trigger.h>
+#include <my_object_position/ObjectDetection.h>
 
 int flag = 1;
 double ALTITUDE = 0.825;
@@ -38,6 +38,8 @@ float init_position_z_take_off =0;
 ros::Time last_target_time;
 ros::Time last_depth_time;
 ros::Time task_start_time;
+ros::ServiceClient play4_client;
+bool play4_started = false;
 
 bool  flag_init_position = false;
 nav_msgs::Odometry local_pos;
@@ -58,23 +60,77 @@ double R_circle_2 = 1;
 double R_circle_3 = 1;
 double R_circle_4 = 1.5;
 double omega_base = 0.137; // 基础角速度
-// 赛题要求：到指定绕飞半径后开始语音，语音开始后绕飞10秒
-double satellite_orbit_radius = 1.0;
-double satellite_orbit_radius_tolerance = 0.15;
-double satellite_orbit_duration = 10.0;
 double depth_target = 0.385; // 目标深度 (0.34~0.43) 中间值
 double Kp_depth = 1; // 控制增益 (可调)
 
-void object_position_cb(const geometry_msgs::PointStamped::ConstPtr& msg)
+double yellow_balloon_x = 3.5;
+double yellow_balloon_y = -1.0;
+double yellow_balloon_altitude = 1.8;
+
+// 卫星和黄气球共用 my_object_position 的置信度过滤与结构化检测接口。
+bool yellow_detection_valid = false;
+int yellow_x_pixel = 320;
+int yellow_y_pixel = 240;
+float yellow_area_ratio = 0.0f;
+ros::Time last_yellow_detection_time;
+
+double yellow_image_center_x = 320.0;
+double yellow_image_center_y = 240.0;
+double yellow_pixel_tolerance = 60.0;
+double yellow_detection_timeout = 0.5;
+std::string satellite_class_name;
+std::string yellow_balloon_class_name;
+
+enum YellowTaskState
 {
-    bbox_ratio = msg->point.z/100;
-    target_x = msg->point.x;
-    last_target_time = ros::Time::now();
+    YELLOW_MOVE_TO_AREA = 0,
+    YELLOW_WAIT_CAPTURE = 1,
+    YELLOW_DESCEND = 2,
+    YELLOW_RETURN_HOME = 3,
+    YELLOW_LAND = 4
+};
+
+YellowTaskState yellow_task_state = YELLOW_MOVE_TO_AREA;
+int yellow_capture_count = 0;
+
+void object_detection_cb(
+    const my_object_position::ObjectDetection::ConstPtr& msg)
+{
+    if (msg->class_name == satellite_class_name)
+    {
+        bbox_ratio = msg->aspect_ratio;
+        target_x = msg->center_x;
+        last_target_time = ros::Time::now();
+    }
+    else if (msg->class_name == yellow_balloon_class_name)
+    {
+        yellow_detection_valid = true;
+        yellow_x_pixel = msg->center_x;
+        yellow_y_pixel = msg->center_y;
+        yellow_area_ratio = msg->area_ratio;
+        last_yellow_detection_time = ros::Time::now();
+    }
 }
 void depth_object_position_cb(const geometry_msgs::PointStamped::ConstPtr& msg)
 {
     depth = msg->point.z;
     last_depth_time = ros::Time::now();
+}
+
+bool yellow_balloon_is_detected()
+{
+    return yellow_detection_valid &&
+           (ros::Time::now() - last_yellow_detection_time <
+            ros::Duration(yellow_detection_timeout));
+}
+
+bool yellow_balloon_is_centered()
+{
+    if (!yellow_balloon_is_detected())
+        return false;
+
+    return (std::fabs(yellow_x_pixel - yellow_image_center_x) <= yellow_pixel_tolerance &&
+            std::fabs(yellow_y_pixel - yellow_image_center_y) <= yellow_pixel_tolerance);
 }
 bool is_target_detected()
 {
@@ -107,68 +163,6 @@ void local_pos_cb(const nav_msgs::Odometry::ConstPtr& msg)
 	tf::Matrix3x3(quat).getRPY(roll, pitch, yaw);
 }
 
-
-// ================================================================
-// 黄色气球任务参数
-// ================================================================
-// 任务顺序：卫星绕飞 -> 飞到黄色气球搜索点/可调高度 -> 原地自转搜索
-// -> 视觉逼近 -> 面积达到阈值停止 -> 返回原始起飞点 -> 降落。
-std::string yellow_topic = "/yellow_balloon_position";
-double yellow_balloon_altitude = 1.8;     // 黄气球搜索/逼近的实际local odom高度（米）
-double yellow_balloon_x = 0.0;             // launch中填写的黄气球/搜索区域X
-double yellow_balloon_y = 0.0;             // launch中填写的黄气球/搜索区域Y
-double yellow_search_yaw_rate = 0.20;      // 搜索自转角速度 rad/s
-double yellow_target_x = 320.0;             // 图像水平中心
-double yellow_center_tolerance = 30.0;     // 水平像素容差
-double yellow_yaw_kp = 0.002;              // 像素误差到yaw速度比例
-double yellow_approach_speed = 0.25;        // 远距离逼近速度 m/s
-double yellow_slow_approach_speed = 0.08;   // 接近时减速速度 m/s
-double yellow_area_slow_threshold = 0.10;   // 达到后降低逼近速度
-double yellow_area_contact_threshold = 0.25;// 达到后停止逼近
-double yellow_message_timeout = 0.5;        // 视觉消息有效期
-double yellow_loss_return_timeout = 1.0;    // 丢失视觉多久返回搜索
-double yellow_search_timeout = 60.0;        // 搜索提示超时时间
-int yellow_detect_count_required = 3;       // 连续新消息数
-
-double yellow_target_pixel_x = 320.0;
-double yellow_target_pixel_y = 240.0;
-double yellow_area_ratio = 0.0;
-ros::Time last_yellow_time;
-
-// 消息序号：避免20Hz主循环重复计算同一条视觉消息
-unsigned long long yellow_message_seq = 0;
-unsigned long long yellow_last_counted_seq = 0;
-int yellow_detect_count = 0;
-
-void yellow_balloon_cb(const geometry_msgs::PointStamped::ConstPtr& msg)
-{
-    if (!std::isfinite(msg->point.x) ||
-        !std::isfinite(msg->point.y) ||
-        !std::isfinite(msg->point.z))
-    {
-        ROS_WARN_THROTTLE(1.0, "Invalid yellow balloon message: NaN/Inf");
-        return;
-    }
-
-    yellow_target_pixel_x = msg->point.x;
-    yellow_target_pixel_y = msg->point.y;
-
-    // 面积比例统一限制在[0,1]
-    yellow_area_ratio = msg->point.z;
-    if (yellow_area_ratio < 0.0) yellow_area_ratio = 0.0;
-    if (yellow_area_ratio > 1.0) yellow_area_ratio = 1.0;
-
-    last_yellow_time = ros::Time::now();
-    ++yellow_message_seq;
-}
-
-bool yellowMessageFresh()
-{
-    return !last_yellow_time.isZero() &&
-           (ros::Time::now() - last_yellow_time <
-            ros::Duration(yellow_message_timeout));
-}
-
 void loadParameters(ros::NodeHandle& private_nh)
 {
     private_nh.param<double>("ALTITUDE", ALTITUDE, 0.825);
@@ -179,59 +173,45 @@ void loadParameters(ros::NodeHandle& private_nh)
     private_nh.param<double>("Kp", Kp, 0.0025);
     private_nh.param<double>("Kd", Kd, 0.0003);
 
+    // 目标检测参数
     private_nh.param<double>("aspect_threshold", aspect_threshold, 1.1);
     private_nh.param<double>("delta_omega", delta_omega, 0.05);
 
+    // 圆形轨迹参数
     private_nh.param<double>("R_circle_0", R_circle_0, 1.7);
-    private_nh.param<double>("R_circle_1", R_circle_1, 1.0);
-    private_nh.param<double>("R_circle_2", R_circle_2, 1.0);
-    private_nh.param<double>("R_circle_3", R_circle_3, 1.0);
+    private_nh.param<double>("R_circle_1", R_circle_1, 1);
+    private_nh.param<double>("R_circle_2", R_circle_2, 1);
+    private_nh.param<double>("R_circle_3", R_circle_3, 1);
     private_nh.param<double>("R_circle_4", R_circle_4, 1.5);
     private_nh.param<double>("omega_base", omega_base, 0.137);
-    private_nh.param<double>("satellite_orbit_radius", satellite_orbit_radius, R_circle_1);
-    private_nh.param<double>("satellite_orbit_radius_tolerance", satellite_orbit_radius_tolerance, 0.15);
-    private_nh.param<double>("satellite_orbit_duration", satellite_orbit_duration, 10.0);
 
+    // 深度控制参数
     private_nh.param<double>("depth_target", depth_target, 0.385);
     private_nh.param<double>("Kp_depth", Kp_depth, 1.0);
-
-    // ============================================================
-    // 黄色气球参数：全部可以直接在launch中修改
-    // ============================================================
-    private_nh.param<std::string>("yellow_topic", yellow_topic, "/yellow_balloon_position");
+    private_nh.param<double>("yellow_balloon_x", yellow_balloon_x, 3.5);
+    private_nh.param<double>("yellow_balloon_y", yellow_balloon_y, -1.0);
     private_nh.param<double>("yellow_balloon_altitude", yellow_balloon_altitude, 1.8);
-    private_nh.param<double>("yellow_balloon_x", yellow_balloon_x, 0.0);
-    private_nh.param<double>("yellow_balloon_y", yellow_balloon_y, 0.0);
-    private_nh.param<double>("yellow_search_yaw_rate", yellow_search_yaw_rate, 0.20);
-    private_nh.param<double>("yellow_target_x", yellow_target_x, 320.0);
-    private_nh.param<double>("yellow_center_tolerance", yellow_center_tolerance, 30.0);
-    private_nh.param<double>("yellow_yaw_kp", yellow_yaw_kp, 0.002);
-    private_nh.param<double>("yellow_approach_speed", yellow_approach_speed, 0.25);
-    private_nh.param<double>("yellow_slow_approach_speed", yellow_slow_approach_speed, 0.08);
-    private_nh.param<double>("yellow_area_slow_threshold", yellow_area_slow_threshold, 0.10);
-    private_nh.param<double>("yellow_area_contact_threshold", yellow_area_contact_threshold, 0.25);
-    private_nh.param<double>("yellow_message_timeout", yellow_message_timeout, 0.5);
-    private_nh.param<double>("yellow_loss_return_timeout", yellow_loss_return_timeout, 1.0);
-    private_nh.param<double>("yellow_search_timeout", yellow_search_timeout, 60.0);
-    private_nh.param<int>("yellow_detect_count_required", yellow_detect_count_required, 3);
+    private_nh.param<double>("yellow_image_center_x", yellow_image_center_x, 320.0);
+    private_nh.param<double>("yellow_image_center_y", yellow_image_center_y, 240.0);
+    private_nh.param<double>("yellow_pixel_tolerance", yellow_pixel_tolerance, 60.0);
+    private_nh.param<double>("yellow_detection_timeout", yellow_detection_timeout, 0.5);
+    private_nh.param<std::string>("satellite_class_name", satellite_class_name, "");
+    private_nh.param<std::string>("yellow_balloon_class_name", yellow_balloon_class_name, "");
 
     ROS_INFO("ALTITUDE: %f", ALTITUDE);
-    ROS_INFO("Satellite center offset: x=%f, y=%f", position_x, position_y);
-    ROS_INFO("Circle R: %.2f %.2f %.2f %.2f, omega=%.3f",
-             R_circle_0, R_circle_1, R_circle_2, R_circle_3, omega_base);
-    ROS_INFO("Satellite orbit: radius=%.2f tolerance=%.2f duration=%.1f s",
-             satellite_orbit_radius, satellite_orbit_radius_tolerance,
-             satellite_orbit_duration);
-
-    ROS_INFO("===== Yellow balloon parameters =====");
-    ROS_INFO("yellow vision topic: %s", yellow_topic.c_str());
-    ROS_INFO("search point: x=%.3f y=%.3f, altitude=%.3f",
-             yellow_balloon_x, yellow_balloon_y, yellow_balloon_altitude);
-    ROS_INFO("search yaw rate=%.3f rad/s", yellow_search_yaw_rate);
-    ROS_INFO("approach speed=%.3f / %.3f m/s",
-             yellow_approach_speed, yellow_slow_approach_speed);
-    ROS_INFO("area slow threshold=%.3f", yellow_area_slow_threshold);
-    ROS_INFO("area stop threshold=%.3f", yellow_area_contact_threshold);
+    ROS_INFO("position_x: %f", position_x);
+    ROS_INFO("position_y: %f", position_y);
+    ROS_INFO("  Kp_fast: %.6f, Kp_slow: %.6f", Kp_fast, Kp_slow);
+    ROS_INFO("  Kp: %.6f, Kd: %.6f", Kp, Kd);
+    ROS_INFO("  aspect_threshold : %.1f,delta_omega: %.3f", aspect_threshold, delta_omega);
+    ROS_INFO("  Radius: R0=%.1f, R1=%.1f, R2=%.1f, R3=%.1f, R4=%.1f", R_circle_0, R_circle_1, R_circle_2, R_circle_3, R_circle_4);
+    ROS_INFO("  omega_base: %.3f", omega_base);
+    ROS_INFO("  Target Depth: %.3f, Kp_depth: %.1f", depth_target, Kp_depth);
+    ROS_INFO("  Yellow visual center: (%.1f, %.1f), tolerance: %.1f px, timeout: %.2f s",
+             yellow_image_center_x, yellow_image_center_y,
+             yellow_pixel_tolerance, yellow_detection_timeout);
+    ROS_INFO("  YOLO classes: satellite='%s', yellow_balloon='%s'",
+             satellite_class_name.c_str(), yellow_balloon_class_name.c_str());
 }
 
 int main(int argc, char **argv)
@@ -242,15 +222,21 @@ int main(int argc, char **argv)
     // 加载参数
     loadParameters(private_nh);
 
-    last_target_time = ros::Time::now();
-    ros::Subscriber object_pos_sub = nh.subscribe<geometry_msgs::PointStamped>(
-    "/object_position", 10, object_position_cb);
+    if (satellite_class_name.empty() || yellow_balloon_class_name.empty() ||
+        satellite_class_name == yellow_balloon_class_name)
+    {
+        ROS_FATAL("Set distinct, non-empty satellite_class_name and "
+                  "yellow_balloon_class_name parameters before flight.");
+        return 1;
+    }
+
+    last_target_time = ros::Time(0);
+    last_yellow_detection_time = ros::Time(0);
+    ros::Subscriber object_detection_sub =
+        nh.subscribe<my_object_position::ObjectDetection>(
+            "/object_detection", 10, object_detection_cb);
     ros::Subscriber depth_object_pos_sub = nh.subscribe<geometry_msgs::PointStamped>(
     "/depth_object_position", 10, depth_object_position_cb);
-    // 黄色气球视觉：PointStamped.x=像素X，y=像素Y，z=面积比例[0,1]
-    ros::Subscriber yellow_balloon_sub = nh.subscribe<geometry_msgs::PointStamped>(
-        yellow_topic, 10, yellow_balloon_cb);
-    last_yellow_time = ros::Time(0);
     ros::Subscriber state_sub = nh.subscribe<mavros_msgs::State>(
         "mavros/state", 10, state_cb);
 
@@ -266,8 +252,10 @@ int main(int argc, char **argv)
     ros::ServiceClient set_mode_client = nh.serviceClient<mavros_msgs::SetMode>(
         "mavros/set_mode");
 
-    // My Voice：主控只调用 play4 服务，不直接处理语音内容
-    ros::ServiceClient client4 = nh.serviceClient<std_srvs::Trigger>("play4");
+    ros::ServiceClient client1 = nh.serviceClient<std_srvs::Trigger>("play1");
+    ros::ServiceClient client2 = nh.serviceClient<std_srvs::Trigger>("play2");
+    ros::ServiceClient client3 = nh.serviceClient<std_srvs::Trigger>("play3");
+    play4_client = nh.serviceClient<std_srvs::Trigger>("play4");
     std_srvs::Trigger trigger;
 
     //the setpoint publishing rate MUST be faster than 2Hz
@@ -353,152 +341,131 @@ int main(int argc, char **argv)
         rate.sleep();
     }   
     
-
-    // ================================================================
-    // 卫星绕飞结束后的黄色气球任务
-    // task 0~3：原卫星任务；task 4：黄色气球任务
-    // ================================================================
-    {
-        ros::Rate mission_rate(20.0);
-
+    // ==== Minimal change: continuous circle trajectory ====
+    {   
+        ros::Time last_time = ros::Time::now();
+        ros::Time return_time;
+        
         double cx = init_position_x_take_off + position_x;
         double cy = init_position_y_take_off + position_y;
-        double theta = atan2(local_pos.pose.pose.position.y - cy,
-                             local_pos.pose.pose.position.x - cx);
-
+        double theta = 0.0;
+        bool init_flag = true;
+        bool return_flag = false;
         int vision_count = 0;
         double R_circle = R_circle_0;
+        double R_circle_last = R_circle_3;
         double omega_circle = omega_base;
-        // task 0：卫星搜索
-        // task 1：识别后飞到指定绕飞半径，尚未开始10秒计时
-        // task 2：语音成功后正式绕飞，计时10秒
-        // task 4：黄色气球任务
         int task_num = 0;
-        float error_x = 0.0f;
-        float last_error_x = 0.0f;
+        int task_num_last = 13;
+        float error_x = 0;
+        float last_error_x = 0;
+        
+  
 
-        enum YellowState {
-            YELLOW_MOVE, YELLOW_SEARCH, YELLOW_APPROACH,
-            YELLOW_HOLD, YELLOW_RETURN, YELLOW_LAND
-        };
-        YellowState yellow_state = YELLOW_MOVE;
-        ros::Time yellow_state_start = ros::Time::now();
-        ros::Time yellow_loss_start;
-        double yellow_command_yaw = yaw;
-        bool yellow_initialized = false;
-        bool satellite_voice_played = false;  // play4 服务只调用一次
+        if (init_flag) {
+            theta = atan2(local_pos.pose.pose.position.y - cy,
+                          local_pos.pose.pose.position.x - cx);
+            init_flag = false;
+        }
 
-        // launch中的黄色气球坐标作为“搜索区域”坐标，高度也完全由launch参数决定。
-        // 真正识别后，逼近控制仍然完全依据视觉像素和面积。
-        const double yellow_search_x = yellow_balloon_x;
-        const double yellow_search_y = yellow_balloon_y;
-        const double yellow_search_z = yellow_balloon_altitude;
-
+        ros::Rate circle_rate(20.0);
         while (ros::ok())
         {
-            ros::spinOnce();
-
             if (!flag_init_position) {
-                mission_rate.sleep();
+                circle_rate.sleep();
                 continue;
             }
 
-            const ros::Time now = ros::Time::now();
-
-            // ========================================================
-            // 1. 卫星任务：识别 -> 到指定半径 -> 播报 -> 绕飞10秒
-            // ========================================================
-            if (task_num >= 0 && task_num <= 2)
+            // ===== 任务切换 =====
+            // task 0：原来的卫星搜索
+            // task 1：识别卫星后，原来的 R1 绕飞轨迹；到达 R1 后调用 play4
+            // task 2：play4 成功后的正式10秒绕飞（仍使用原来的圆轨迹控制）
+            // task 4：黄气球任务
+            if (task_num == 1 && !play4_started)
             {
-                switch (task_num)
+                double current_radius = std::sqrt(
+                    std::pow(local_pos.pose.pose.position.x - cx, 2) +
+                    std::pow(local_pos.pose.pose.position.y - cy, 2));
+
+                if (std::fabs(current_radius - R_circle_1) < 0.10)
                 {
-                    // ------------------------------------------------
-                    // task 0：原卫星搜索
-                    // ------------------------------------------------
+                    std_srvs::Trigger play4_srv;
+                    if (play4_client.call(play4_srv) && play4_srv.response.success)
+                    {
+                        play4_started = true;
+                        task_start_time = ros::Time::now();
+                        task_num = 2;
+                        ROS_INFO("play4 service succeeded. Start 10-second satellite orbit.");
+                    }
+                    else
+                    {
+                        ROS_WARN_THROTTLE(1.0, "play4 service failed. Waiting at R1 orbit radius.");
+                    }
+                }
+            }
+
+            if (task_num == 2 && ros::Time::now() - task_start_time > ros::Duration(10.0))
+            {
+                task_num = 4;
+                task_start_time = ros::Time::now();
+                yellow_task_state = YELLOW_MOVE_TO_AREA;
+                yellow_capture_count = 0;
+                ROS_INFO("Satellite 10-second orbit finished. Start yellow balloon mission.");
+            }
+
+            // ==== control ==== //
+            {
+                switch(task_num)
+                {
                     case 0:
                     {
                         if (first_is_target_detected())
-                            vision_count++;
-                        else
-                            vision_count = 0;
-
-                        // 连续识别成功后，进入“到指定半径”阶段
-                        if (vision_count > 5)
                         {
-                            task_num = 1;
-                            omega_circle = omega_base;
-                            R_circle = satellite_orbit_radius;
-                            ROS_INFO("Satellite detected. Move to orbit radius %.2f m.",
-                                     satellite_orbit_radius);
+                            ROS_INFO("vision_count = %d",vision_count);
+                            vision_count++;
                         }
                         else
                         {
-                            // 卫星搜索阶段仍按原来的大半径搜索
-                            omega_circle = -omega_base / 2.0;
+                            vision_count = 0;
+                        }
+
+                        if(vision_count>5)
+                        {
+                            // 保持原来的逻辑：识别后进入 R1 圆轨迹。
+                            // 语音不在这里直接播放，而是在真正到达 R1 后调用 play4。
+                            omega_circle = omega_base;
+                            R_circle = R_circle_1;
+                            task_num = 1;
+                            play4_started = false;
+                        }
+                        else
+                        {
+                            omega_circle = -omega_base/2;
                             R_circle = R_circle_0;
                         }
                         break;
                     }
 
-                    // ------------------------------------------------
-                    // task 1：到指定绕飞距离
-                    // 到达后才调用 My Voice play4
-                    // ------------------------------------------------
                     case 1:
+                    case 2:
                     {
-                        R_circle = satellite_orbit_radius;
-
-                        // 继续沿指定半径的圆轨迹飞行，直到实际位置
-                        // 与目标半径足够接近。
-                        double dx = local_pos.pose.pose.position.x - cx;
-                        double dy = local_pos.pose.pose.position.y - cy;
-                        double actual_radius = sqrt(dx * dx + dy * dy);
-
-                        if (fabs(actual_radius - satellite_orbit_radius) <=
-                            satellite_orbit_radius_tolerance)
-                        {
-                            // 只有 play4 服务调用成功，才开始计算10秒绕飞时间。
-                            if (!satellite_voice_played)
-                            {
-                                if (client4.call(trigger) && trigger.response.success)
-                                {
-                                    satellite_voice_played = true;
-                                    task_start_time = now;
-                                    task_num = 2;
-                                    ROS_INFO("play4 service succeeded. Start 10-second satellite orbit.");
-                                }
-                                else
-                                {
-                                    ROS_WARN_THROTTLE(1.0,
-                                        "play4 service failed. Waiting at orbit radius.");
-                                }
-                            }
-                        }
+                        // 保留原来的卫星绕飞半径逻辑。
+                        // task 1 负责到达 R1；task 2 在 play4 成功后继续绕飞10秒。
+                        R_circle = R_circle_1;
                         break;
                     }
 
-                    // ------------------------------------------------
-                    // task 2：语音开始后正式绕飞10秒
-                    // ------------------------------------------------
-                    case 2:
+                    case 4:
                     {
-                        R_circle = satellite_orbit_radius;
-
-                        if (now - task_start_time >=
-                            ros::Duration(satellite_orbit_duration))
-                        {
-                            task_num = 4;
-                            yellow_initialized = false;
-                            ROS_INFO("Satellite orbit completed: %.1f seconds. "
-                                     "Enter yellow balloon mission.",
-                                     satellite_orbit_duration);
-                        }
+                        // 黄气球：先上升到指定高度，再水平飞到相对起飞点的指定位置。
+                        R_circle = R_circle_4;
+                        omega_circle = 0.0;
                         break;
                     }
                 }
 
-                // 卫星绕飞阶段的原视觉跟踪角速度控制
-                if (task_num >= 1 && task_num <= 2)
+                // 原来的视觉跟踪角速度控制，只用于卫星绕飞 task 1/2。
+                if(task_num == 1 || task_num == 2)
                 {
                     if (is_target_detected())
                     {
@@ -506,384 +473,271 @@ int main(int argc, char **argv)
                         if (error_x > 200) error_x = 200;
                         if (error_x < -200) error_x = -200;
 
-                        Kp = (error_x > 0) ? Kp_fast : Kp_slow;
-                        float d_error_x =
-                            (error_x - last_error_x) * 20.0f;
+                        if(error_x > 0)
+                            Kp = Kp_fast;
+                        else
+                            Kp = Kp_slow;
+
+                        float d_error_x = (error_x - last_error_x) * 20.0;
                         last_error_x = error_x;
 
                         if (bbox_ratio > aspect_threshold)
                         {
                             if (target_x < 320.0f)
-                                omega_circle = omega_base +
-                                    Kp * error_x + Kd * d_error_x -
-                                    delta_omega;
+                                omega_circle = omega_base + Kp * error_x + Kd * d_error_x - delta_omega;
                             else
-                                omega_circle = omega_base +
-                                    Kp * error_x + Kd * d_error_x +
-                                    delta_omega;
+                                omega_circle = omega_base + Kp * error_x + Kd * d_error_x + delta_omega;
                         }
                         else
-                        {
-                            omega_circle = omega_base +
-                                Kp * error_x + Kd * d_error_x;
-                        }
+                            omega_circle = omega_base + Kp * error_x + Kd * d_error_x;
                     }
                     else
                     {
                         omega_circle = omega_base;
                         last_error_x = 0.0f;
                     }
-
-                    if (omega_circle < 0.02) omega_circle = 0.02;
-                    if (omega_circle > 0.25) omega_circle = 0.25;
                 }
-
-                // task 0：搜索半径；task 1/2：指定绕飞半径
-                theta += omega_circle / 20.0;
-
-                double x_d = cx + R_circle * cos(theta);
-                double y_d = cy + R_circle * sin(theta);
-                double z_d = init_position_z_take_off + ALTITUDE;
-
-                double yaw_face =
-                    atan2(cy - local_pos.pose.pose.position.y,
-                          cx - local_pos.pose.pose.position.x);
-
-                tf::Quaternion q_tf;
-                q_tf.setRPY(0, 0, yaw_face);
-                tf::quaternionTFToMsg(q_tf, pose.pose.orientation);
-
-                pose.header.stamp = now;
-                pose.pose.position.x = x_d;
-                pose.pose.position.y = y_d;
-                pose.pose.position.z = z_d;
-
-                ROS_INFO_THROTTLE(
-                    2.0,
-                    "SATELLITE: task=%d R=%.2f omega=%.3f",
-                    task_num, R_circle, omega_circle);
             }
 
-            // ========================================================
-            // 2. 绕飞结束：黄色气球任务
-            // ========================================================
-            else if (task_num == 4)
+            // ===== 黄气球任务：到指定区域后，用统一 YOLO 结果确认并完成捕获 =====
+            // my_object_position 已完成置信度过滤并保留类别、中心和面积比例。
+            // 这里不根据像素直接推算飞行方向；
+            // 先按 launch 的坐标飞到黄气球区域，再用视觉确认“看到且居中”。
+            if (task_num == 4)
             {
-                if (!yellow_initialized)
+                const double yellow_x =
+                    init_position_x_take_off + yellow_balloon_x;
+                const double yellow_y =
+                    init_position_y_take_off + yellow_balloon_y;
+                const double yellow_z = yellow_balloon_altitude;
+                const double return_z =
+                    init_position_z_take_off + ALTITUDE;
+
+                if (yellow_task_state == YELLOW_MOVE_TO_AREA)
                 {
-                    yellow_initialized = true;
-                    yellow_state = YELLOW_MOVE;
-                    yellow_state_start = now;
-                    yellow_command_yaw = yaw;
-                    yellow_detect_count = 0;
-                    yellow_last_counted_seq = yellow_message_seq;
-                    yellow_loss_start = ros::Time(0);
-
-                    ROS_INFO("===== SATELLITE CIRCLE FINISHED =====");
-                    ROS_INFO("Yellow search point=(%.3f, %.3f), height=%.3f",
-                             yellow_search_x, yellow_search_y,
-                             yellow_balloon_altitude);
-                }
-
-                // ----------------------------------------------------
-                // 2.1 飞到黄色气球搜索点，高度1.8m
-                // ----------------------------------------------------
-                if (yellow_state == YELLOW_MOVE)
-                {
-                    pose.header.stamp = now;
-                    pose.pose.position.x = yellow_search_x;
-                    pose.pose.position.y = yellow_search_y;
-                    pose.pose.position.z = yellow_search_z;
-
-                    tf::Quaternion q_tf;
-                    q_tf.setRPY(0, 0, yellow_command_yaw);
-                    tf::quaternionTFToMsg(q_tf, pose.pose.orientation);
-
-                    double dx = local_pos.pose.pose.position.x -
-                                yellow_search_x;
-                    double dy = local_pos.pose.pose.position.y -
-                                yellow_search_y;
-                    double dz = local_pos.pose.pose.position.z -
-                                yellow_search_z;
-                    double xy_error = sqrt(dx * dx + dy * dy);
-
-                    if (xy_error < 0.20 && fabs(dz) < 0.20)
+                    // 1. 先垂直上升到黄气球任务高度
+                    if (std::fabs(local_pos.pose.pose.position.z - yellow_z) > 0.08)
                     {
-                        yellow_state = YELLOW_SEARCH;
-                        yellow_state_start = now;
-                        yellow_command_yaw = yaw;
-                        yellow_detect_count = 0;
-                        yellow_last_counted_seq = yellow_message_seq;
+                        pose.pose.position.x = local_pos.pose.pose.position.x;
+                        pose.pose.position.y = local_pos.pose.pose.position.y;
+                        pose.pose.position.z = yellow_z;
+                    }
+                    else
+                    {
+                        // 2. 再水平飞到 launch 指定的黄气球区域
+                        double dx = yellow_x - local_pos.pose.pose.position.x;
+                        double dy = yellow_y - local_pos.pose.pose.position.y;
+                        double dxy = std::sqrt(dx * dx + dy * dy);
 
-                        ROS_INFO("Reached yellow search point. "
-                                 "Start 360-degree search.");
+                        pose.pose.position.x = yellow_x;
+                        pose.pose.position.y = yellow_y;
+                        pose.pose.position.z = yellow_z;
+
+                        if (dxy <= 0.12)
+                        {
+                            yellow_task_state = YELLOW_WAIT_CAPTURE;
+                            yellow_capture_count = 0;
+                            ROS_INFO("Reached yellow balloon search position. Start visual capture confirmation.");
+                        }
                     }
                 }
-
-                // ----------------------------------------------------
-                // 2.2 原地自转识别
-                // ----------------------------------------------------
-                else if (yellow_state == YELLOW_SEARCH)
+                else if (yellow_task_state == YELLOW_WAIT_CAPTURE)
                 {
-                    if (yellowMessageFresh())
+                    // 3. 到达指定区域后必须有视觉检测
+                    // 4. 检测目标还需要进入图像中心附近
+                    pose.pose.position.x = yellow_x;
+                    pose.pose.position.y = yellow_y;
+                    pose.pose.position.z = yellow_z;
+
+                    if (yellow_balloon_is_centered())
                     {
-                        if (yellow_message_seq != yellow_last_counted_seq)
+                        yellow_capture_count++;
+
+                        if (yellow_capture_count >= 5)
                         {
-                            yellow_last_counted_seq = yellow_message_seq;
-                            yellow_detect_count++;
+                            ROS_INFO(
+                                "Yellow balloon captured: visual detection confirmed, "
+                                "pixel=(%d,%d), area_ratio=%.4f.",
+                                yellow_x_pixel, yellow_y_pixel, yellow_area_ratio);
+
+                            yellow_task_state = YELLOW_DESCEND;
+                            yellow_capture_count = 0;
+                            task_start_time = ros::Time::now();
                         }
                     }
                     else
                     {
-                        yellow_detect_count = 0;
-                    }
+                        yellow_capture_count = 0;
 
-                    if (yellow_detect_count >=
-                        yellow_detect_count_required)
-                    {
-                        yellow_state = YELLOW_APPROACH;
-                        yellow_state_start = now;
-                        yellow_loss_start = ros::Time(0);
-
-                        ROS_INFO("Yellow balloon detected: "
-                                 "pixel_x=%.1f area=%.3f",
-                                 yellow_target_pixel_x,
-                                 yellow_area_ratio);
-                    }
-
-                    // 超时只报警，不盲目飞行，继续原地搜索
-                    if (now - yellow_state_start >
-                        ros::Duration(yellow_search_timeout))
-                    {
-                        ROS_WARN_THROTTLE(
-                            5.0,
-                            "Yellow search timeout; continue rotating.");
-                    }
-
-                    // 原地自转：XY固定，只改变yaw
-                    yellow_command_yaw += yellow_search_yaw_rate / 20.0;
-
-                    pose.header.stamp = now;
-                    pose.pose.position.x = yellow_search_x;
-                    pose.pose.position.y = yellow_search_y;
-                    pose.pose.position.z = yellow_search_z;
-
-                    tf::Quaternion q_tf;
-                    q_tf.setRPY(0, 0, yellow_command_yaw);
-                    tf::quaternionTFToMsg(q_tf, pose.pose.orientation);
-                }
-
-                // ----------------------------------------------------
-                // 2.3 识别后逼近
-                // ----------------------------------------------------
-                else if (yellow_state == YELLOW_APPROACH)
-                {
-                    // 视觉丢失：立即停止向前，超过1秒回搜索
-                    if (!yellowMessageFresh())
-                    {
-                        if (yellow_loss_start.isZero())
-                            yellow_loss_start = now;
-
-                        pose.header.stamp = now;
-                        pose.pose.position.x =
-                            local_pos.pose.pose.position.x;
-                        pose.pose.position.y =
-                            local_pos.pose.pose.position.y;
-                        pose.pose.position.z = yellow_search_z;
-
-                        tf::Quaternion q_tf;
-                        q_tf.setRPY(0, 0, yellow_command_yaw);
-                        tf::quaternionTFToMsg(q_tf, pose.pose.orientation);
-
-                        if (now - yellow_loss_start >
-                            ros::Duration(yellow_loss_return_timeout))
+                        if (yellow_balloon_is_detected())
                         {
-                            ROS_WARN("Yellow vision lost; return to search.");
-                            yellow_state = YELLOW_SEARCH;
-                            yellow_state_start = now;
-                            yellow_detect_count = 0;
-                            yellow_last_counted_seq = yellow_message_seq;
-                            yellow_loss_start = ros::Time(0);
+                            ROS_WARN_THROTTLE(
+                                1.0,
+                                "Yellow balloon detected but not centered: pixel=(%d,%d). Holding position.",
+                                yellow_x_pixel, yellow_y_pixel);
                         }
-
-                        local_pos_pub.publish(pose);
-                        mission_rate.sleep();
-                        continue;
-                    }
-
-                    yellow_loss_start = ros::Time(0);
-
-                    // 面积达到阈值：停止逼近
-                    if (yellow_area_ratio >=
-                        yellow_area_contact_threshold)
-                    {
-                        ROS_INFO("Yellow target distance reached: "
-                                 "area=%.3f >= %.3f",
-                                 yellow_area_ratio,
-                                 yellow_area_contact_threshold);
-
-                        yellow_state = YELLOW_HOLD;
-                        yellow_state_start = now;
-                        yellow_command_yaw = yaw;
-                    }
-                    else
-                    {
-                        // 水平像素误差控制yaw
-                        double pixel_error =
-                            yellow_target_pixel_x - yellow_target_x;
-
-                        double yaw_rate = 0.0;
-                        if (fabs(pixel_error) >
-                            yellow_center_tolerance)
+                        else
                         {
-                            yaw_rate = -yellow_yaw_kp * pixel_error;
-
-                            if (yaw_rate > yellow_search_yaw_rate)
-                                yaw_rate = yellow_search_yaw_rate;
-                            if (yaw_rate < -yellow_search_yaw_rate)
-                                yaw_rate = -yellow_search_yaw_rate;
+                            ROS_WARN_THROTTLE(
+                                1.0,
+                                "Waiting for valid yellow balloon detection. Holding position.");
                         }
-
-                        yellow_command_yaw += yaw_rate / 20.0;
-
-                        // 面积达到slow阈值后减速
-                        double speed =
-                            (yellow_area_ratio >=
-                             yellow_area_slow_threshold)
-                            ? yellow_slow_approach_speed
-                            : yellow_approach_speed;
-
-                        // 沿当前yaw方向向前逼近
-                        pose.header.stamp = now;
-                        pose.pose.position.x =
-                            local_pos.pose.pose.position.x +
-                            speed * cos(yellow_command_yaw) / 20.0;
-                        pose.pose.position.y =
-                            local_pos.pose.pose.position.y +
-                            speed * sin(yellow_command_yaw) / 20.0;
-                        pose.pose.position.z = yellow_search_z;
-
-                        tf::Quaternion q_tf;
-                        q_tf.setRPY(0, 0, yellow_command_yaw);
-                        tf::quaternionTFToMsg(q_tf,
-                                              pose.pose.orientation);
-
-                        ROS_INFO_THROTTLE(
-                            1.0,
-                            "YELLOW_APPROACH: area=%.3f "
-                            "pixel_error=%.1f speed=%.3f",
-                            yellow_area_ratio,
-                            pixel_error, speed);
                     }
                 }
-
-                // ----------------------------------------------------
-                // 2.4 达到面积阈值：停止逼近
-                // ----------------------------------------------------
-                else if (yellow_state == YELLOW_HOLD)
+                else if (yellow_task_state == YELLOW_DESCEND)
                 {
-                    pose.header.stamp = now;
-                    pose.pose.position.x =
-                        local_pos.pose.pose.position.x;
-                    pose.pose.position.y =
-                        local_pos.pose.pose.position.y;
-                    pose.pose.position.z = yellow_search_z;
+                    // 5. 捕获成功后，下降到与卫星任务相同的高度
+                    pose.pose.position.x = yellow_x;
+                    pose.pose.position.y = yellow_y;
+                    pose.pose.position.z = return_z;
 
-                    tf::Quaternion q_tf;
-                    q_tf.setRPY(0, 0, yellow_command_yaw);
-                    tf::quaternionTFToMsg(q_tf,
-                                          pose.pose.orientation);
-
-                    // 保持1秒后返航
-                    if (now - yellow_state_start >
-                        ros::Duration(1.0))
+                    if (std::fabs(local_pos.pose.pose.position.z - return_z) <= 0.08)
                     {
-                        yellow_state = YELLOW_RETURN;
-                        ROS_INFO("Yellow approach finished. "
-                                 "Return to original takeoff point.");
+                        yellow_task_state = YELLOW_RETURN_HOME;
+                        ROS_INFO("Yellow balloon capture height reached. Returning home.");
                     }
                 }
-
-                // ----------------------------------------------------
-                // 2.5 返回最初起飞点
-                // ----------------------------------------------------
-                else if (yellow_state == YELLOW_RETURN)
+                else if (yellow_task_state == YELLOW_RETURN_HOME)
                 {
-                    pose.header.stamp = now;
+                    // 6. 保持卫星任务高度，水平返回最初起飞点
                     pose.pose.position.x = init_position_x_take_off;
                     pose.pose.position.y = init_position_y_take_off;
-                    pose.pose.position.z =
-                        yellow_search_z;
+                    pose.pose.position.z = return_z;
 
-                    double return_yaw =
-                        atan2(init_position_y_take_off -
-                                  local_pos.pose.pose.position.y,
-                              init_position_x_take_off -
-                                  local_pos.pose.pose.position.x);
+                    double home_dx =
+                        init_position_x_take_off - local_pos.pose.pose.position.x;
+                    double home_dy =
+                        init_position_y_take_off - local_pos.pose.pose.position.y;
+                    double home_dxy =
+                        std::sqrt(home_dx * home_dx + home_dy * home_dy);
 
-                    tf::Quaternion q_tf;
-                    q_tf.setRPY(0, 0, return_yaw);
-                    tf::quaternionTFToMsg(q_tf,
-                                          pose.pose.orientation);
-
-                    double dx =
-                        local_pos.pose.pose.position.x -
-                        init_position_x_take_off;
-                    double dy =
-                        local_pos.pose.pose.position.y -
-                        init_position_y_take_off;
-                    double return_distance = sqrt(dx * dx + dy * dy);
-
-                    ROS_INFO_THROTTLE(
-                        2.0,
-                        "YELLOW_RETURN: distance=%.2f m",
-                        return_distance);
-
-                    if (return_distance < 0.20)
+                    if (home_dxy <= 0.12)
                     {
-                        yellow_state = YELLOW_LAND;
-                        yellow_state_start = now;
-                        ROS_INFO("Returned to original point. "
-                                 "Prepare AUTO.LAND.");
+                        yellow_task_state = YELLOW_LAND;
+                        task_start_time = ros::Time::now();
+                        ROS_INFO("Returned to takeoff point. Holding before AUTO.LAND.");
                     }
                 }
-
-                // ----------------------------------------------------
-                // 2.6 起点保持3秒后降落
-                // ----------------------------------------------------
-                else if (yellow_state == YELLOW_LAND)
+                else if (yellow_task_state == YELLOW_LAND)
                 {
-                    pose.header.stamp = now;
+                    // 7. 回到起飞点保持2秒，然后 AUTO.LAND
                     pose.pose.position.x = init_position_x_take_off;
                     pose.pose.position.y = init_position_y_take_off;
-                    pose.pose.position.z =
-                        yellow_search_z;
+                    pose.pose.position.z = return_z;
 
-                    tf::Quaternion q_tf;
-                    q_tf.setRPY(0, 0, yellow_command_yaw);
-                    tf::quaternionTFToMsg(q_tf,
-                                          pose.pose.orientation);
-
-                    if (now - yellow_state_start >
-                        ros::Duration(3.0))
+                    if (ros::Time::now() - task_start_time > ros::Duration(2.0))
                     {
                         land_set_mode.request.custom_mode = "AUTO.LAND";
-
                         if (set_mode_client.call(land_set_mode) &&
                             land_set_mode.response.mode_sent)
                         {
-                            ROS_INFO("AUTO.LAND enabled. "
-                                     "Mission completed.");
-                            break;
+                            ROS_INFO("AUTO.LAND enabled after yellow balloon mission.");
+                            task_num = 5;
+                        }
+                        else
+                        {
+                            ROS_WARN_THROTTLE(
+                                1.0,
+                                "Failed to enable AUTO.LAND. Holding at home position.");
                         }
                     }
                 }
+
+                pose.header.stamp = ros::Time::now();
+                local_pos_pub.publish(pose);
+                ros::spinOnce();
+                circle_rate.sleep();
+                continue;
             }
 
+            // 已经发送 AUTO.LAND 后，不再继续发送圆轨迹点。
+            if (task_num == 5)
+            {
+                pose.header.stamp = ros::Time::now();
+                pose.pose.position.x = init_position_x_take_off;
+                pose.pose.position.y = init_position_y_take_off;
+                pose.pose.position.z = init_position_z_take_off + ALTITUDE;
+                local_pos_pub.publish(pose);
+                ros::spinOnce();
+                circle_rate.sleep();
+                continue;
+            }
+
+            // 限制角速度
+            if(task_num == 0)
+            {
+                if (omega_circle > -0.02) omega_circle = -0.02;
+                if (omega_circle < -0.25) omega_circle = -0.25;
+            }
+            else
+            {
+                if (omega_circle < 0.02) omega_circle = 0.02;
+                if (omega_circle > 0.25) omega_circle = 0.25;
+            }
+
+            theta += omega_circle * (1.0 / 20.0);
+            
+            
+
+            //计算位置
+            double x_d = cx + R_circle * cos(theta);
+            double y_d = cy + R_circle * sin(theta);
+            double z_d = init_position_z_take_off + ALTITUDE;
+
+            //姿态计算
+            double yaw_face = atan2(cy - local_pos.pose.pose.position.y , cx - local_pos.pose.pose.position.x);
+            tf::Quaternion q_tf;
+            q_tf.setRPY(0, 0, yaw_face);
+            geometry_msgs::Quaternion q_msg;
+            tf::quaternionTFToMsg(q_tf, q_msg);
+            
+            if(!return_flag)
+            {
+                pose.header.stamp = ros::Time::now();
+                pose.pose.position.x = x_d;
+                pose.pose.position.y = y_d;
+                pose.pose.position.z = z_d;
+                pose.pose.orientation = q_msg;
+            }
+            else
+            {
+                pose.header.stamp = ros::Time::now();
+                if(ros::Time::now() - return_time > ros::Duration(15.0))
+                {
+                    land_set_mode.request.custom_mode = "AUTO.LAND";
+                    if (set_mode_client.call(land_set_mode) && land_set_mode.response.mode_sent)
+                    {
+                        ROS_INFO("LAND mode enabled");
+                    }
+                }
+                else
+                {
+                    pose.header.stamp = ros::Time::now();
+                    pose.pose.position.x = init_position_x_take_off - 0.05;
+                    pose.pose.position.y = init_position_y_take_off + 0.05;
+                    pose.pose.position.z = init_position_z_take_off + ALTITUDE;
+                }
+            }
+
+		//打印信息
+            bool detected = is_target_detected();
+            ROS_INFO("Target detected: %s", detected ? "true" : "false");
+            ROS_INFO("omega=%f,R=%f",omega_circle,R_circle);
+            ROS_INFO("current_x=%f,current_y=%f,current_z = %f",local_pos.pose.pose.position.x,local_pos.pose.pose.position.y,local_pos.pose.pose.position.z);
+            ROS_INFO("expect_x=%f,expect_y=%f",x_d,y_d);
+            ROS_INFO("error_x=%f",error_x);
+            ROS_INFO("task_num=%d",task_num);
+            ROS_INFO("depth=%f",depth);
+            ROS_INFO("bbox_ratio=%f",bbox_ratio);
+            
+            
+            ros::spinOnce();
             local_pos_pub.publish(pose);
-            mission_rate.sleep();
+            circle_rate.sleep();
         }
     }
 
+    ros::spinOnce();
+    rate.sleep();
     return 0;
 }

@@ -5,14 +5,13 @@
     <!-- Single-camera YOLO detector -->
     <include file="$(find yolov8_ros)/launch/yolo_v8.launch" />
 
-    <!-- Convert YOLO bounding boxes to /object_position for the main controller -->
+    <!-- Filter YOLO confidence and publish /object_detection for the main controller. -->
     <node name="my_object_position"
           pkg="my_object_position"
           type="my_object_position"
-          output="screen" />
-
-    <!-- Detect the yellow balloon from the same USB camera stream -->
-    <include file="$(find yellow_detector)/launch/yellow_detector.launch">
-        <arg name="image_topic" value="/usb_cam/image_raw" />
-    </include>
+          output="screen">
+        <param name="confidence_threshold" type="double" value="0.8" />
+        <param name="image_width" type="int" value="640" />
+        <param name="image_height" type="int" value="480" />
+    </node>
 </launch>
