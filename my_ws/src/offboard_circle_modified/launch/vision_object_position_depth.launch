@@ -1,0 +1,33 @@
+<launch>
+    <!--
+      D435 topics used by the local conversion nodes.
+      With an unmodified realsense2_camera/rs_camera.launch the color topic is
+      /camera/color/image_raw. If the on-board launch puts D435 under /d435,
+      start this file with d435_image_topic:=/d435/color/image_raw.
+
+      The existing my_object_position node expects /yolov8/BoundingBoxes. If
+      yolo_v8_d435.launch uses the camera_2 namespace instead, pass
+      d435_bbox_topic:=/yolov8/camera_2/BoundingBoxes.
+    -->
+    <arg name="d435_image_topic" default="/d435/color/image_raw" />
+    <arg name="d435_bbox_topic" default="/yolov8/BoundingBoxes" />
+
+    <!-- Equivalent to: roslaunch realsense2_camera rs_camera.launch -->
+    <include file="$(find realsense2_camera)/launch/rs_camera.launch" />
+
+    <!-- Equivalent to: roslaunch yolov8_ros yolo_v8_d435.launch -->
+    <include file="$(find yolov8_ros)/launch/yolo_v8_d435.launch" />
+
+    <!-- Convert YOLO bounding boxes to /object_position for the main controller -->
+    <node name="my_object_position"
+          pkg="my_object_position"
+          type="my_object_position"
+          output="screen">
+        <remap from="/yolov8/BoundingBoxes" to="$(arg d435_bbox_topic)" />
+    </node>
+
+    <!-- Detect the yellow balloon from the same D435 color stream -->
+    <include file="$(find yellow_detector)/launch/yellow_detector_depth.launch">
+        <arg name="image_topic" value="$(arg d435_image_topic)" />
+    </include>
+</launch>

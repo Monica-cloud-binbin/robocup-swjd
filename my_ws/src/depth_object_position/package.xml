@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>depth_object_position</name>
+  <version>0.0.1</version>
+  <description>The depth_object_position package</description>
+  <maintainer email="chutter@uos.de">clemens</maintainer>
+  <license>TODO</license>
+
+  <!-- Build dependencies -->
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>roscpp</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>message_generation</build_depend>
+  <build_depend>tf</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+  <build_depend>cv_bridge</build_depend>
+  <build_depend>image_transport</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>yolov8_ros_msgs</build_depend>  <!-- Added darknet_ros_msgs dependency -->
+
+  <!-- Export dependencies -->
+  <build_export_depend>roscpp</build_export_depend>
+  <build_export_depend>std_msgs</build_export_depend>
+  <build_export_depend>message_runtime</build_export_depend>
+
+  <!-- Executable dependencies -->
+  <exec_depend>roscpp</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>message_runtime</exec_depend>
+  <exec_depend>tf</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>image_transport</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>yolov8_ros_msgs</exec_depend>  <!-- Added darknet_ros_msgs dependency -->
+
+  <!-- The export tag contains other, unspecified, tags -->
+  <export>
+    <!-- Other tools can request additional information be placed here -->
+  </export>
+</package>

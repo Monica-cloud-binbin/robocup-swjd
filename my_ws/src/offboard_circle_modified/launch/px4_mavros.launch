@@ -1,0 +1,19 @@
+<launch>
+    <!-- PX4 / MAVROS connection -->
+    <include file="$(find robot_bringup)/launch/px4.launch" />
+
+    <!-- Unitree lidar driver -->
+    <include file="$(find unitree_lidar_ros)/launch/run_without_rviz.launch" />
+
+    <!-- Point-LIO localization for Unitree L1 -->
+    <include file="$(find robot_bringup)/launch/test_location.launch" />
+
+    <!-- Convert /pointlio/odom to /mavros/vision_pose/pose -->
+    <node name="unitree_l1_to_mavros"
+          pkg="unitree_l1_to_mavros"
+          type="unitree_l1_to_mavros"
+          output="screen" />
+
+    <!-- Voice playback services used by the main controller: play1/play2/play3 -->
+    <include file="$(find my_voice)/launch/voice.launch" />
+</launch>

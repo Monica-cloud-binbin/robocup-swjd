@@ -1,0 +1,18 @@
+<launch>
+    <!-- USB camera image source -->
+    <include file="$(find usb_cam)/launch/usb_cam-test.launch" />
+
+    <!-- Single-camera YOLO detector -->
+    <include file="$(find yolov8_ros)/launch/yolo_v8.launch" />
+
+    <!-- Convert YOLO bounding boxes to /object_position for the main controller -->
+    <node name="my_object_position"
+          pkg="my_object_position"
+          type="my_object_position"
+          output="screen" />
+
+    <!-- Detect the yellow balloon from the same USB camera stream -->
+    <include file="$(find yellow_detector)/launch/yellow_detector.launch">
+        <arg name="image_topic" value="/usb_cam/image_raw" />
+    </include>
+</launch>

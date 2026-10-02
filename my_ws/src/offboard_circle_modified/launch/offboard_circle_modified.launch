@@ -1,0 +1,166 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- ============================================================
+         无人机：卫星绕飞 -> 黄色气球识别/逼近 -> 返回起点 -> 降落
+
+         任务顺序：
+         1. 起飞到 ALTITUDE
+         2. 连续识别到卫星后飞到指定绕飞半径
+         3. 到达指定半径后通过 My Voice 的 play4 服务播报“正在绕飞”
+         4. 从语音服务调用成功这一刻开始绕飞10秒
+         5. 10秒结束后进入黄色气球任务
+         4. 飞到 yellow_balloon_x/y，并上升/下降到 launch 中可调的 yellow_balloon_altitude
+         5. 原地自转识别黄色气球
+         6. 识别后视觉逼近
+         7. 面积达到 yellow_area_contact_threshold 后停止逼近
+         8. 返回最初起飞点
+         9. AUTO.LAND
+
+         yellow_balloon_x/y 使用 mavros/local_position/odom 同一坐标系。
+         识别后真正的逼近方向由视觉控制，不会盲目飞向这个固定坐标。
+         ============================================================ -->
+
+    <node pkg="offboard_circle_modified"
+          type="offboard_circle_modified"
+          name="offboard_circle_modified"
+          output="screen">
+
+        <!-- ================= 基础飞行参数 ================= -->
+        <param name="ALTITUDE" type="double" value="1" />
+
+        <!-- 卫星位置：相对于最初起飞点的坐标偏移 -->
+        <param name="position_x" type="double" value="4" />
+        <param name="position_y" type="double" value="0" />
+
+        <!-- ================= 卫星视觉控制 ================= -->
+        <param name="Kp_fast" type="double" value="0.00035" />
+        <param name="Kp_slow" type="double" value="0.00020" />
+        <param name="Kp" type="double" value="0.0025" />
+        <param name="Kd" type="double" value="0.0003" />
+        <param name="aspect_threshold" type="double" value="1.1" />
+        <param name="delta_omega" type="double" value="0.05" />
+
+        <!-- ================= 卫星绕飞参数 ================= -->
+        <param name="R_circle_0" type="double" value="1.4" />
+        <param name="R_circle_1" type="double" value="0.8" />
+        <param name="R_circle_2" type="double" value="0.8" />
+        <param name="R_circle_3" type="double" value="1.4" />
+        <param name="R_circle_4" type="double" value="1.4" />
+        <param name="omega_base" type="double" value="0.116" />
+
+        <!-- 赛题绕飞：到达这个半径后才播报“正在绕飞” -->
+        <param name="satellite_orbit_radius"
+               type="double"
+               value="0.8" />
+
+        <!-- 实际半径进入 ±0.15m 后认为已经到达指定距离 -->
+        <param name="satellite_orbit_radius_tolerance"
+               type="double"
+               value="0.15" />
+
+        <!-- 语音开始后正式绕飞10秒 -->
+        <param name="satellite_orbit_duration"
+               type="double"
+               value="12.0" />
+
+        <!-- ================= 深度参数（原程序保留） ================= -->
+        <param name="depth_target" type="double" value="0.385" />
+        <param name="Kp_depth" type="double" value="1.0" />
+
+        <!-- ==========================================================
+             黄色气球参数
+             ========================================================== -->
+
+        <!-- 黄色气球视觉话题 -->
+        <param name="yellow_topic"
+               type="string"
+               value="/yellow_balloon_position" />
+
+        <!--
+             黄色气球/搜索区域的 local odom 坐标。
+             绕卫星结束后，无人机会先飞到这里，再原地自转找气球。
+
+             !!! 请根据你的实际地图修改这两个值 !!!
+        -->
+        <param name="yellow_balloon_x" type="double" value="1.75" />
+        <param name="yellow_balloon_y" type="double" value="4.85" />
+
+        <!--
+             黄气球实际搜索/逼近高度（米）。
+             例如气球在约1.8米高，就填写1.80；
+             如果现场测得气球高度为2.20米，就改成2.20。
+             该参数直接作为local odom的Z目标高度。
+        -->
+        <param name="yellow_balloon_altitude"
+               type="double"
+               value="1.60" />
+
+        <!-- ================= 自转识别 ================= -->
+        <param name="yellow_search_yaw_rate"
+               type="double"
+               value="0.20" />
+
+        <!-- 图像水平中心 -->
+        <param name="yellow_target_x"
+               type="double"
+               value="320.0" />
+
+        <!-- 水平像素误差容许范围 -->
+        <param name="yellow_center_tolerance"
+               type="double"
+               value="30.0" />
+
+        <!-- 像素误差 -> yaw角速度 -->
+        <param name="yellow_yaw_kp"
+               type="double"
+               value="0.002" />
+
+        <!-- ================= 黄色气球逼近 ================= -->
+
+        <!-- 远距离逼近速度 -->
+        <param name="yellow_approach_speed"
+               type="double"
+               value="0.25" />
+
+        <!-- 接近气球后降低速度 -->
+        <param name="yellow_slow_approach_speed"
+               type="double"
+               value="0.08" />
+
+        <!-- 面积达到10%以后减速 -->
+        <param name="yellow_area_slow_threshold"
+               type="double"
+               value="0.10" />
+
+        <!--
+             面积达到25%：
+             认为已经达到目标距离，立即停止逼近并返航。
+
+             ★ 最重要的距离参数 ★
+        -->
+        <param name="yellow_area_contact_threshold"
+               type="double"
+               value="0.25" />
+
+        <!-- 视觉消息超过0.5秒没有更新，认为失效 -->
+        <param name="yellow_message_timeout"
+               type="double"
+               value="0.50" />
+
+        <!-- 逼近过程中视觉丢失超过1秒，退回自转搜索 -->
+        <param name="yellow_loss_return_timeout"
+               type="double"
+               value="1.00" />
+
+        <!-- 自转搜索超过该时间只报警，仍继续原地搜索 -->
+        <param name="yellow_search_timeout"
+               type="double"
+               value="60.0" />
+
+        <!-- 连续收到3条新的视觉消息才进入逼近 -->
+        <param name="yellow_detect_count_required"
+               type="int"
+               value="3" />
+
+    </node>
+</launch>

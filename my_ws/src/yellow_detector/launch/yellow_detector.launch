@@ -1,0 +1,34 @@
+<launch>
+  <arg name="image_topic" default="/camera/color/image_raw" />
+  <node pkg="yellow_detector" type="yellow_detector_node.py" name="yellow_detector" output="screen">
+    <param name="image_topic" value="$(arg image_topic)" />
+    <param name="mission_topic" value="/yellow_balloon_position" />
+    <param name="result_topic" value="/yellow_detector/detection" />
+    <param name="debug_topic" value="/yellow_detector/debug_image" />
+
+    <!-- OpenCV HSV: H=0..179, S/V=0..255；现场可通过 rosparam 调整。 -->
+    <param name="h_min" value="18" />
+    <param name="h_max" value="38" />
+    <param name="s_min" value="80" />
+    <param name="s_max" value="255" />
+    <param name="v_min" value="80" />
+    <param name="v_max" value="255" />
+    <param name="min_area" value="500.0" />
+    <param name="morph_kernel_size" value="5" />
+
+    <!-- 几何约束：保留 HSV 与 min_area，优先通过这些参数降低误报。 -->
+    <param name="min_area_ratio" value="0.0015" />
+    <param name="max_area_ratio" value="0.70" />
+    <param name="min_aspect_ratio" value="0.65" />
+    <param name="max_aspect_ratio" value="1.40" />
+    <param name="min_circularity" value="0.60" />
+    <param name="min_extent" value="0.55" />
+    <param name="min_solidity" value="0.88" />
+    <param name="rectangle_reject_extent" value="0.84" />
+
+    <!-- 最近 5 帧至少 4 帧有效，且当前帧有效，才发布主控位置。 -->
+    <param name="confirm_window" value="5" />
+    <param name="confirm_hits" value="4" />
+    <param name="show_reject_reason" value="true" />
+  </node>
+</launch>

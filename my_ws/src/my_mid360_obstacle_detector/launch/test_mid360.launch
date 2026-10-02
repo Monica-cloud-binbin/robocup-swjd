@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<launch>
+  <!-- Mid-360障碍物检测节点 -->
+  <node pkg="my_mid360_obstacle_detector" type="test_mid360" name="test_mid360" output="screen">
+    <!-- 安全距离参数 -->
+    <param name="front_safe_distance" value="1.0" />   <!-- 前方安全距离 (米) -->
+    <param name="side_safe_distance" value="0.8" />    <!-- 侧方安全距离 (米) -->
+    <param name="rear_safe_distance" value="1.2" />    <!-- 后方安全距离 (米) -->
+  </node>
+
+</launch>

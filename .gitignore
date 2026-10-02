@@ -1,0 +1,39 @@
+# Keep only project instructions/log, the command list, my_ws source tree, and rules.
+/*
+!/.gitignore
+!/AGENTS.md
+!/BUG_FIX_LOG.md
+!/指令集.txt
+!/my_ws/
+
+# Within my_ws, keep only src.
+/my_ws/*
+!/my_ws/src/
+
+# Generated build output and local tooling artifacts inside the kept tree.
+**/build/
+**/devel/
+**/install/
+**/logs/
+**/log/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bag
+*.pcd
+*.ply
+*.las
+*.log
