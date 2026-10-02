@@ -58,10 +58,6 @@ double R_circle_2 = 1;
 double R_circle_3 = 1;
 double R_circle_4 = 1.5;
 double omega_base = 0.137; // 基础角速度
-// 赛题要求：到指定绕飞半径后开始语音，语音开始后绕飞10秒
-double satellite_orbit_radius = 1.0;
-double satellite_orbit_radius_tolerance = 0.15;
-double satellite_orbit_duration = 10.0;
 double depth_target = 0.385; // 目标深度 (0.34~0.43) 中间值
 double Kp_depth = 1; // 控制增益 (可调)
 
@@ -188,9 +184,6 @@ void loadParameters(ros::NodeHandle& private_nh)
     private_nh.param<double>("R_circle_3", R_circle_3, 1.0);
     private_nh.param<double>("R_circle_4", R_circle_4, 1.5);
     private_nh.param<double>("omega_base", omega_base, 0.137);
-    private_nh.param<double>("satellite_orbit_radius", satellite_orbit_radius, R_circle_1);
-    private_nh.param<double>("satellite_orbit_radius_tolerance", satellite_orbit_radius_tolerance, 0.15);
-    private_nh.param<double>("satellite_orbit_duration", satellite_orbit_duration, 10.0);
 
     private_nh.param<double>("depth_target", depth_target, 0.385);
     private_nh.param<double>("Kp_depth", Kp_depth, 1.0);
@@ -219,9 +212,6 @@ void loadParameters(ros::NodeHandle& private_nh)
     ROS_INFO("Satellite center offset: x=%f, y=%f", position_x, position_y);
     ROS_INFO("Circle R: %.2f %.2f %.2f %.2f, omega=%.3f",
              R_circle_0, R_circle_1, R_circle_2, R_circle_3, omega_base);
-    ROS_INFO("Satellite orbit: radius=%.2f tolerance=%.2f duration=%.1f s",
-             satellite_orbit_radius, satellite_orbit_radius_tolerance,
-             satellite_orbit_duration);
 
     ROS_INFO("===== Yellow balloon parameters =====");
     ROS_INFO("yellow vision topic: %s", yellow_topic.c_str());
@@ -266,7 +256,9 @@ int main(int argc, char **argv)
     ros::ServiceClient set_mode_client = nh.serviceClient<mavros_msgs::SetMode>(
         "mavros/set_mode");
 
-    // My Voice：主控只调用 play4 服务，不直接处理语音内容
+    ros::ServiceClient client1 = nh.serviceClient<std_srvs::Trigger>("play1");
+    ros::ServiceClient client2 = nh.serviceClient<std_srvs::Trigger>("play2");
+    ros::ServiceClient client3 = nh.serviceClient<std_srvs::Trigger>("play3");
     ros::ServiceClient client4 = nh.serviceClient<std_srvs::Trigger>("play4");
     std_srvs::Trigger trigger;
 
@@ -369,11 +361,8 @@ int main(int argc, char **argv)
         int vision_count = 0;
         double R_circle = R_circle_0;
         double omega_circle = omega_base;
-        // task 0：卫星搜索
-        // task 1：识别后飞到指定绕飞半径，尚未开始10秒计时
-        // task 2：语音成功后正式绕飞，计时10秒
-        // task 4：黄色气球任务
         int task_num = 0;
+        int task_num_last = 13;
         float error_x = 0.0f;
         float last_error_x = 0.0f;
 
@@ -386,7 +375,7 @@ int main(int argc, char **argv)
         ros::Time yellow_loss_start;
         double yellow_command_yaw = yaw;
         bool yellow_initialized = false;
-        bool satellite_voice_played = false;  // play4 服务只调用一次
+        bool satellite_voice_played = false;  // “正在绕飞”只播报一次
 
         // launch中的黄色气球坐标作为“搜索区域”坐标，高度也完全由launch参数决定。
         // 真正识别后，逼近控制仍然完全依据视觉像素和面积。
@@ -406,15 +395,32 @@ int main(int argc, char **argv)
             const ros::Time now = ros::Time::now();
 
             // ========================================================
-            // 1. 卫星任务：识别 -> 到指定半径 -> 播报 -> 绕飞10秒
+            // 1. 原来的卫星绕飞：task 0~3
             // ========================================================
-            if (task_num >= 0 && task_num <= 2)
+            if (task_num >= 0 && task_num <= 3)
             {
+                // task1/2/3各20秒，task3结束后进入task4
+                if (task_num > 0 && task_num < 4 &&
+                    now - task_start_time > ros::Duration(20.0))
+                {
+                    task_num++;
+                    task_start_time = now;
+                    ROS_INFO("Satellite circle segment finished, task=%d",
+                             task_num);
+                }
+
+                if (task_num_last != task_num &&
+                    now - task_start_time > ros::Duration(6.0))
+                {
+                    task_num_last = task_num;
+                    if (task_num == 1) client1.call(trigger);
+                    if (task_num == 2) client2.call(trigger);
+                    if (task_num == 3) client3.call(trigger);
+                    ROS_INFO("task now: %d", task_num);
+                }
+
                 switch (task_num)
                 {
-                    // ------------------------------------------------
-                    // task 0：原卫星搜索
-                    // ------------------------------------------------
                     case 0:
                     {
                         if (first_is_target_detected())
@@ -422,83 +428,48 @@ int main(int argc, char **argv)
                         else
                             vision_count = 0;
 
-                        // 连续识别成功后，进入“到指定半径”阶段
                         if (vision_count > 5)
                         {
-                            task_num = 1;
+                            task_start_time = now;
                             omega_circle = omega_base;
-                            R_circle = satellite_orbit_radius;
-                            ROS_INFO("Satellite detected. Move to orbit radius %.2f m.",
-                                     satellite_orbit_radius);
+                            R_circle = R_circle_1;
+                            task_num = 1;
+
+                            // 调用 My Voice 的 play4 服务，播报“正在绕飞”
+                            // 只在第一次进入卫星绕飞时调用一次
+                            if (!satellite_voice_played)
+                            {
+                                if (client4.call(trigger))
+                                    ROS_INFO("Voice: 正在绕飞");
+                                else
+                                    ROS_WARN("Failed to call voice service: play4");
+
+                                satellite_voice_played = true;
+                            }
+
+                            ROS_INFO("Satellite detected, start circle.");
                         }
                         else
                         {
-                            // 卫星搜索阶段仍按原来的大半径搜索
                             omega_circle = -omega_base / 2.0;
                             R_circle = R_circle_0;
                         }
                         break;
                     }
 
-                    // ------------------------------------------------
-                    // task 1：到指定绕飞距离
-                    // 到达后才调用 My Voice play4
-                    // ------------------------------------------------
                     case 1:
-                    {
-                        R_circle = satellite_orbit_radius;
-
-                        // 继续沿指定半径的圆轨迹飞行，直到实际位置
-                        // 与目标半径足够接近。
-                        double dx = local_pos.pose.pose.position.x - cx;
-                        double dy = local_pos.pose.pose.position.y - cy;
-                        double actual_radius = sqrt(dx * dx + dy * dy);
-
-                        if (fabs(actual_radius - satellite_orbit_radius) <=
-                            satellite_orbit_radius_tolerance)
-                        {
-                            // 只有 play4 服务调用成功，才开始计算10秒绕飞时间。
-                            if (!satellite_voice_played)
-                            {
-                                if (client4.call(trigger) && trigger.response.success)
-                                {
-                                    satellite_voice_played = true;
-                                    task_start_time = now;
-                                    task_num = 2;
-                                    ROS_INFO("play4 service succeeded. Start 10-second satellite orbit.");
-                                }
-                                else
-                                {
-                                    ROS_WARN_THROTTLE(1.0,
-                                        "play4 service failed. Waiting at orbit radius.");
-                                }
-                            }
-                        }
+                        R_circle = R_circle_1;
                         break;
-                    }
-
-                    // ------------------------------------------------
-                    // task 2：语音开始后正式绕飞10秒
-                    // ------------------------------------------------
                     case 2:
-                    {
-                        R_circle = satellite_orbit_radius;
-
-                        if (now - task_start_time >=
-                            ros::Duration(satellite_orbit_duration))
-                        {
-                            task_num = 4;
-                            yellow_initialized = false;
-                            ROS_INFO("Satellite orbit completed: %.1f seconds. "
-                                     "Enter yellow balloon mission.",
-                                     satellite_orbit_duration);
-                        }
+                        R_circle = R_circle_2;
                         break;
-                    }
+                    case 3:
+                        R_circle = R_circle_3;
+                        break;
                 }
 
-                // 卫星绕飞阶段的原视觉跟踪角速度控制
-                if (task_num >= 1 && task_num <= 2)
+                // 原来的卫星视觉跟踪角速度控制
+                if (task_num > 0 && task_num < 4)
                 {
                     if (is_target_detected())
                     {
@@ -533,12 +504,19 @@ int main(int argc, char **argv)
                         omega_circle = omega_base;
                         last_error_x = 0.0f;
                     }
+                }
 
+                if (task_num == 0)
+                {
+                    if (omega_circle > -0.02) omega_circle = -0.02;
+                    if (omega_circle < -0.25) omega_circle = -0.25;
+                }
+                else
+                {
                     if (omega_circle < 0.02) omega_circle = 0.02;
                     if (omega_circle > 0.25) omega_circle = 0.25;
                 }
 
-                // task 0：搜索半径；task 1/2：指定绕飞半径
                 theta += omega_circle / 20.0;
 
                 double x_d = cx + R_circle * cos(theta);

@@ -1,6 +1,8 @@
-# Keep only the command list, my_ws source tree, and this rules file.
+# Keep only project instructions/log, the command list, my_ws source tree, and rules.
 /*
 !/.gitignore
+!/AGENTS.md
+!/BUG_FIX_LOG.md
 !/指令集.txt
 !/my_ws/
 

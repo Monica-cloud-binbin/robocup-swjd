@@ -4,19 +4,30 @@ ssh -Y cwkj@192.168.0.100
 source ~/cwkj_ws/devel/setup.bash
 source ~/my_ws/devel/setup.bash
 
-启动PX4/MAVROS/语音/雷达、视觉节点、主控：
+————启动————
+（启动雷达、PX4、语音播报）
 roslaunch offboard_circle_modified px4_mavros.launch
 （USB）
 roslaunch offboard_circle_modified vision_object_position.launch
 （D435）
 roslaunch offboard_circle_modified vision_object_position_depth.launch
+（主控）
 roslaunch offboard_circle_modified offboard_circle_modified.launch
 
-启动主控前检查：
-rostopic echo /mavros/state
-rostopic echo /mavros/local_position/odom
+————监听————
+（yolo检测框坐标）
 rostopic echo /object_position
 
-检查d435从图象-推理能正常运行：
+部分环节检查：
+d435-YOLO->/object_position：
 roslaunch realsense2_camera rs_camera.launch
 roslaunch yolov8_ros yolo_v8_d435.launch
+roslaunch offboard_circle_modified
+
+USB->黄气球探测：
+roslaunch usb_cam usb_cam-test.launch
+roslaunch yellow_detector yellow_detector.launch
+rqt_image_view
+rostopic echo /yellow_detector/detection
+
+

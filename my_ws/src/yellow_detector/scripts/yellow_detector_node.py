@@ -3,6 +3,9 @@
 
 """使用 OpenCV HSV 颜色分割检测黄色气球的 ROS1 节点。"""
 
+from collections import deque
+import math
+
 import cv2
 import numpy as np
 import rospy
@@ -50,6 +53,28 @@ class YellowDetectorNode:
             rospy.logwarn("v_min 大于 v_max，已交换两个参数的值")
 
         self.min_area = max(0.0, float(rospy.get_param("~min_area", 500.0)))
+        # 颜色阈值保持不变，使用形状和最近帧命中数抑制误检。
+        self.min_area_ratio = float(rospy.get_param("~min_area_ratio", 0.0015))
+        self.max_area_ratio = float(rospy.get_param("~max_area_ratio", 0.70))
+        self.min_aspect_ratio = float(rospy.get_param("~min_aspect_ratio", 0.65))
+        self.max_aspect_ratio = float(rospy.get_param("~max_aspect_ratio", 1.40))
+        self.min_circularity = float(rospy.get_param("~min_circularity", 0.60))
+        self.min_extent = float(rospy.get_param("~min_extent", 0.55))
+        self.min_solidity = float(rospy.get_param("~min_solidity", 0.88))
+        self.rectangle_reject_extent = float(
+            rospy.get_param("~rectangle_reject_extent", 0.84)
+        )
+        self.confirm_window = max(1, int(rospy.get_param("~confirm_window", 5)))
+        requested_hits = int(rospy.get_param("~confirm_hits", 4))
+        self.confirm_hits = min(max(1, requested_hits), self.confirm_window)
+        if requested_hits != self.confirm_hits:
+            rospy.logwarn(
+                "confirm_hits=%d 已限制到 [1, confirm_window]，使用 %d",
+                requested_hits,
+                self.confirm_hits,
+            )
+        self.detect_history = deque(maxlen=self.confirm_window)
+
         kernel_size = max(1, int(rospy.get_param("~morph_kernel_size", 5)))
         if kernel_size % 2 == 0:
             kernel_size += 1
@@ -65,11 +90,11 @@ class YellowDetectorNode:
             [self.h_max, self.s_max, self.v_max], dtype=np.uint8
         )
 
-        # 飞控现有接口：只在检测成功时发布 PointStamped。
+        # 飞控现有接口：只在多帧确认成功时发布 PointStamped。
         self.mission_pub = rospy.Publisher(
             self.mission_topic, PointStamped, queue_size=10
         )
-        # 完整检测状态每帧发布，未检测到时 detected=false，其他数值为 0。
+        # 只有多帧确认成功时发布完整检测结果。
         self.result_pub = rospy.Publisher(
             self.result_topic, YellowBalloonDetection, queue_size=10
         )
@@ -109,108 +134,203 @@ class YellowDetectorNode:
             rospy.logwarn("参数 %s=%d 超出范围，已限制为 %d", name, value, bounded)
         return bounded
 
-    def image_callback(self, image_msg):
-        """处理一帧图像并发布任务接口、完整结果和调试图像。"""
+    def evaluate_contour(self, contour, frame_width, frame_height):
+        """统一几何筛选；返回指标和首个拒绝原因，异常轮廓不影响其他目标。"""
+        result = {"accepted": False, "reason": "AREA", "area": 0.0}
         try:
-            # cv_bridge 根据原始 encoding 转换成 RGB；阈值分割按 RGB -> HSV 处理。
+            area = float(cv2.contourArea(contour))
+            if not math.isfinite(area):
+                return result
+            result["area"] = area
+            if area <= 0.0 or area < self.min_area:
+                return result
+
+            result["reason"] = "AREA_RATIO"
+            frame_area = float(frame_width) * float(frame_height)
+            if frame_area <= 0.0 or not math.isfinite(frame_area):
+                return result
+            area_ratio = area / frame_area
+            result["area_ratio"] = area_ratio
+            if not self.min_area_ratio <= area_ratio <= self.max_area_ratio:
+                return result
+
+            result["reason"] = "ASPECT"
+            x, y, w, h = cv2.boundingRect(contour)
+            if w <= 0 or h <= 0:
+                return result
+            aspect_ratio = float(w) / float(h)
+            result["bbox"] = (x, y, w, h)
+            result["aspect_ratio"] = aspect_ratio
+            if not self.min_aspect_ratio <= aspect_ratio <= self.max_aspect_ratio:
+                return result
+
+            result["reason"] = "CIRCULARITY"
+            perimeter = float(cv2.arcLength(contour, True))
+            if perimeter <= 0.0 or not math.isfinite(perimeter):
+                return result
+            circularity = 4.0 * math.pi * area / (perimeter * perimeter)
+            result["circularity"] = circularity
+            if circularity < self.min_circularity:
+                return result
+
+            result["reason"] = "EXTENT"
+            extent = area / float(w * h)
+            result["extent"] = extent
+            if extent < self.min_extent:
+                return result
+
+            result["reason"] = "SOLIDITY"
+            hull_area = float(cv2.contourArea(cv2.convexHull(contour)))
+            if hull_area <= 0.0 or not math.isfinite(hull_area):
+                return result
+            solidity = area / hull_area
+            result["solidity"] = solidity
+            if solidity < self.min_solidity:
+                return result
+
+            result["reason"] = "RECTANGLE"
+            approx = cv2.approxPolyDP(contour, 0.03 * perimeter, True)
+            # 只排除四边形且填充程度高的区域，不能仅凭四个顶点拒绝。
+            if len(approx) == 4 and extent > self.rectangle_reject_extent:
+                return result
+
+            result["accepted"] = True
+            result["reason"] = None
+        except (cv2.error, TypeError, ValueError, OverflowError) as exc:
+            rospy.logwarn_throttle(2.0, "跳过异常黄色轮廓: %s", str(exc))
+        return result
+
+    def _mark_no_detection(self):
+        """无效输入也计作一次未命中，避免旧历史跨过坏帧直接确认。"""
+        self.detect_history.append(False)
+
+    def image_callback(self, image_msg):
+        """处理一帧图像；只有当前候选且最近窗口命中达标才发布任务位置。"""
+        try:
+            # cv_bridge 根据原始 encoding 转换成 RGB；阈值按 RGB -> HSV 处理。
             rgb_image = self.bridge.imgmsg_to_cv2(image_msg, desired_encoding="rgb8")
-        except CvBridgeError as exc:
+        except (CvBridgeError, cv2.error, TypeError, ValueError) as exc:
             rospy.logerr_throttle(2.0, "图像转换失败: %s", str(exc))
+            self._mark_no_detection()
+            return
+
+        if (
+            not isinstance(rgb_image, np.ndarray)
+            or rgb_image.size == 0
+            or rgb_image.ndim != 3
+            or rgb_image.shape[2] != 3
+        ):
+            rospy.logerr_throttle(2.0, "收到空图像或无效 RGB 图像，跳过本帧")
+            self._mark_no_detection()
             return
 
         height, width = rgb_image.shape[:2]
-        if height <= 0 or width <= 0:
-            rospy.logerr_throttle(2.0, "收到空图像，跳过本帧")
+        try:
+            # 保留原有颜色分割、开运算和闭运算。
+            hsv_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2HSV)
+            mask = cv2.inRange(hsv_image, self.lower_hsv, self.upper_hsv)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
+            contour_result = cv2.findContours(
+                mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            contours = contour_result[-2]
+            debug_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
+        except (cv2.error, TypeError, ValueError) as exc:
+            rospy.logerr_throttle(2.0, "图像处理失败: %s", str(exc))
+            self._mark_no_detection()
             return
 
-        # 彩色空间转换、HSV 阈值二值化和形态学去噪。
-        hsv_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2HSV)
-        mask = cv2.inRange(hsv_image, self.lower_hsv, self.upper_hsv)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
+        # 单次遍历选最大合格候选。
+        best = None
+        for contour in contours:
+            evaluated = self.evaluate_contour(contour, width, height)
+            if evaluated["accepted"]:
+                if best is None or evaluated["area"] > best["area"]:
+                    best = evaluated
 
-        # 查找外轮廓，并从达到面积门限的轮廓中选出最大区域。
-        contour_result = cv2.findContours(
-            mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        contours = contour_result[-2]
-        candidates = [
-            (float(cv2.contourArea(contour)), contour)
-            for contour in contours
-            if cv2.contourArea(contour) >= self.min_area
-        ]
-        best = max(candidates, key=lambda item: item[0]) if candidates else None
-
-        detection = YellowBalloonDetection()
-        detection.header = image_msg.header
-        # ROS debug_image 发布 bgr8，因此为绘图创建一份 BGR 图像。
-        debug_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
+        current_detected = best is not None
+        self.detect_history.append(current_detected)
+        stable_hits = sum(self.detect_history)
+        stable_detected = current_detected and stable_hits >= self.confirm_hits
 
         if best is not None:
-            area, contour = best
-            x, y, box_width, box_height = cv2.boundingRect(contour)
-            xmin = int(x)
-            ymin = int(y)
-            xmax = int(x + box_width)
-            ymax = int(y + box_height)
+            x, y, box_width, box_height = best["bbox"]
+            xmin, ymin = int(x), int(y)
+            xmax, ymax = int(x + box_width), int(y + box_height)
             x_pixel = int(x + box_width // 2)
             y_pixel = int(y + box_height // 2)
-            area_ratio = min(max(area / float(width * height), 0.0), 1.0)
+            area = best["area"]
+            area_ratio = min(max(best["area_ratio"], 0.0), 1.0)
 
-            detection.detected = True
-            detection.x_pixel = x_pixel
-            detection.y_pixel = y_pixel
-            detection.xmin = xmin
-            detection.ymin = ymin
-            detection.xmax = xmax
-            detection.ymax = ymax
-            detection.area = area
-            detection.area_ratio = area_ratio
-
-            # 绘制绿色框和目标名称；HSV 检测没有分类置信度，因此标注像素面积。
+            # BGR：候选橙色，多帧确认绿色。
+            color = (0, 255, 0) if stable_detected else (0, 165, 255)
             cv2.rectangle(
                 debug_image,
                 (xmin, ymin),
                 (min(xmax - 1, width - 1), min(ymax - 1, height - 1)),
-                (0, 255, 0),
+                color,
                 2,
             )
             cv2.circle(debug_image, (x_pixel, y_pixel), 4, (0, 0, 255), -1)
-            label = "yellow_balloon area={:.0f}px".format(area)
-            text_y = max(22, ymin - 8)
-            cv2.putText(
-                debug_image,
-                label,
-                (xmin, text_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.65,
-                (0, 255, 0),
-                2,
-                cv2.LINE_AA,
-            )
-
-            # 兼容现有飞控：x/y 是像素中心，z 是画面面积占比 [0, 1]。
-            # 不在未检测帧发布该消息，让任务节点按自己的超时逻辑判断目标丢失。
-            mission_msg = PointStamped()
-            mission_msg.header = image_msg.header
-            mission_msg.point.x = float(x_pixel)
-            mission_msg.point.y = float(y_pixel)
-            mission_msg.point.z = float(area_ratio)
-            self.mission_pub.publish(mission_msg)
-
-            rospy.loginfo_throttle(
-                2.0,
-                "发现黄色区域: center=(%d,%d), bbox=(%d,%d,%d,%d), "
-                "area=%.0f px, ratio=%.4f",
-                x_pixel,
-                y_pixel,
-                xmin,
-                ymin,
-                xmax,
-                ymax,
+            label = (
+                "A={:.0f} AR={:.2f} C={:.2f} E={:.2f} S={:.2f} H={}/{}"
+            ).format(
                 area,
-                area_ratio,
+                best["aspect_ratio"],
+                best["circularity"],
+                best["extent"],
+                best["solidity"],
+                stable_hits,
+                self.confirm_hits,
             )
+            # 适配小分辨率，避免指标文本从画面右侧溢出。
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            text_width = cv2.getTextSize(label, font, 0.55, 1)[0][0]
+            font_scale = min(0.55, 0.55 * max(1, width - 8) / max(1, text_width))
+            label_width = cv2.getTextSize(label, font, font_scale, 1)[0][0]
+            text_x = max(0, min(xmin, width - label_width - 4))
+            text_y = min(height - 1, max(18, ymin - 8))
+            cv2.putText(
+                debug_image, label, (text_x, text_y), font,
+                font_scale, color, 1, cv2.LINE_AA,
+            )
+
+            if stable_detected:
+                detection = YellowBalloonDetection()
+                detection.header = image_msg.header
+                detection.detected = True
+                detection.x_pixel = x_pixel
+                detection.y_pixel = y_pixel
+                detection.xmin = xmin
+                detection.ymin = ymin
+                detection.xmax = xmax
+                detection.ymax = ymax
+                detection.area = area
+                detection.area_ratio = area_ratio
+                self.result_pub.publish(detection)
+
+                # 保留主控字段：x/y=框中心像素，z=轮廓面积占整帧比例。
+                # 无目标或尚未确认时不发布，继续使用主控原有超时机制。
+                mission_msg = PointStamped()
+                mission_msg.header = image_msg.header
+                mission_msg.point.x = float(x_pixel)
+                mission_msg.point.y = float(y_pixel)
+                mission_msg.point.z = float(area_ratio)
+                self.mission_pub.publish(mission_msg)
+
+            log_details = (
+                "center=(%d,%d), bbox=(%d,%d,%d,%d), area=%.0f px, "
+                "ratio=%.4f, AR=%.2f, C=%.2f, E=%.2f, S=%.2f, hits=%d/%d"
+            ) % (
+                x_pixel, y_pixel, xmin, ymin, xmax, ymax,
+                area, area_ratio, best["aspect_ratio"], best["circularity"],
+                best["extent"], best["solidity"], stable_hits, self.confirm_hits,
+            )
+            if stable_detected:
+                rospy.loginfo_throttle(2.0, "绿框确认黄色气球: %s", log_details)
+            else:
+                rospy.loginfo_throttle(2.0, "橙框候选黄色气球: %s", log_details)
         else:
             cv2.putText(
                 debug_image,
@@ -223,14 +343,11 @@ class YellowDetectorNode:
                 cv2.LINE_AA,
             )
 
-        # 无论是否检测到目标，每帧都发布带状态的强类型检测结果。
-        self.result_pub.publish(detection)
-
         try:
             debug_msg = self.bridge.cv2_to_imgmsg(debug_image, encoding="bgr8")
             debug_msg.header = image_msg.header
             self.debug_pub.publish(debug_msg)
-        except CvBridgeError as exc:
+        except (CvBridgeError, cv2.error, TypeError, ValueError) as exc:
             rospy.logerr_throttle(2.0, "调试图像转换失败: %s", str(exc))
 
 

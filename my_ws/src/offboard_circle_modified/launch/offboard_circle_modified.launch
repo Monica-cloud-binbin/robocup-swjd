@@ -5,8 +5,10 @@
 
          任务顺序：
          1. 起飞到 ALTITUDE
-         2. 原程序识别卫星后执行 task 1/2/3 绕飞
-         3. 绕飞结束后进入黄色气球任务
+         2. 连续识别到卫星后飞到指定绕飞半径
+         3. 到达指定半径后通过 My Voice 的 play4 服务播报“正在绕飞”
+         4. 从语音服务调用成功这一刻开始绕飞10秒
+         5. 10秒结束后进入黄色气球任务
          4. 飞到 yellow_balloon_x/y，并上升/下降到 launch 中可调的 yellow_balloon_altitude
          5. 原地自转识别黄色气球
          6. 识别后视觉逼近
@@ -24,11 +26,11 @@
           output="screen">
 
         <!-- ================= 基础飞行参数 ================= -->
-        <param name="ALTITUDE" type="double" value="1.68" />
+        <param name="ALTITUDE" type="double" value="1" />
 
         <!-- 卫星位置：相对于最初起飞点的坐标偏移 -->
-        <param name="position_x" type="double" value="2.01" />
-        <param name="position_y" type="double" value="-2.25" />
+        <param name="position_x" type="double" value="4" />
+        <param name="position_y" type="double" value="0" />
 
         <!-- ================= 卫星视觉控制 ================= -->
         <param name="Kp_fast" type="double" value="0.00035" />
@@ -39,12 +41,27 @@
         <param name="delta_omega" type="double" value="0.05" />
 
         <!-- ================= 卫星绕飞参数 ================= -->
-        <param name="R_circle_0" type="double" value="1.7" />
-        <param name="R_circle_1" type="double" value="0.95" />
-        <param name="R_circle_2" type="double" value="0.95" />
-        <param name="R_circle_3" type="double" value="0.90" />
-        <param name="R_circle_4" type="double" value="1.5" />
+        <param name="R_circle_0" type="double" value="1.4" />
+        <param name="R_circle_1" type="double" value="0.8" />
+        <param name="R_circle_2" type="double" value="0.8" />
+        <param name="R_circle_3" type="double" value="1.4" />
+        <param name="R_circle_4" type="double" value="1.4" />
         <param name="omega_base" type="double" value="0.116" />
+
+        <!-- 赛题绕飞：到达这个半径后才播报“正在绕飞” -->
+        <param name="satellite_orbit_radius"
+               type="double"
+               value="0.8" />
+
+        <!-- 实际半径进入 ±0.15m 后认为已经到达指定距离 -->
+        <param name="satellite_orbit_radius_tolerance"
+               type="double"
+               value="0.15" />
+
+        <!-- 语音开始后正式绕飞10秒 -->
+        <param name="satellite_orbit_duration"
+               type="double"
+               value="12.0" />
 
         <!-- ================= 深度参数（原程序保留） ================= -->
         <param name="depth_target" type="double" value="0.385" />
@@ -65,8 +82,8 @@
 
              !!! 请根据你的实际地图修改这两个值 !!!
         -->
-        <param name="yellow_balloon_x" type="double" value="3.50" />
-        <param name="yellow_balloon_y" type="double" value="-1.00" />
+        <param name="yellow_balloon_x" type="double" value="1.75" />
+        <param name="yellow_balloon_y" type="double" value="4.85" />
 
         <!--
              黄气球实际搜索/逼近高度（米）。
@@ -76,7 +93,7 @@
         -->
         <param name="yellow_balloon_altitude"
                type="double"
-               value="1.80" />
+               value="1.60" />
 
         <!-- ================= 自转识别 ================= -->
         <param name="yellow_search_yaw_rate"

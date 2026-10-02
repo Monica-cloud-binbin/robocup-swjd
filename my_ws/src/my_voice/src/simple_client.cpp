@@ -9,6 +9,7 @@ int main(int argc, char** argv) {
     ros::ServiceClient client1 = nh.serviceClient<std_srvs::Trigger>("play1");
     ros::ServiceClient client2 = nh.serviceClient<std_srvs::Trigger>("play2");
     ros::ServiceClient client3 = nh.serviceClient<std_srvs::Trigger>("play3");
+    ros::ServiceClient client4 = nh.serviceClient<std_srvs::Trigger>("play4");
     
     std_srvs::Trigger trigger;
     
@@ -22,6 +23,9 @@ int main(int argc, char** argv) {
     
     // 播放语音3
     client3.call(trigger);
+    
+    // 播放语音4：正在绕飞
+    client4.call(trigger);
     
     return 0;
 }
