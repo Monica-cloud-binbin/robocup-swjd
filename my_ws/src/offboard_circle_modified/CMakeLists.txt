@@ -217,6 +217,12 @@ target_link_libraries(offboard_circle_modified ${catkin_LIBRARIES})
 add_executable(offboard_obstacle_test src/offboard_obstacle_test.cpp)
 target_link_libraries(offboard_obstacle_test ${catkin_LIBRARIES})
 
+add_executable(offboard_obstacle_intersection_test
+  src/offboard_obstacle_intersection_test.cpp
+)
+add_dependencies(offboard_obstacle_intersection_test ${catkin_EXPORTED_TARGETS})
+target_link_libraries(offboard_obstacle_intersection_test ${catkin_LIBRARIES})
+
 add_executable(offboard_test_base
   src/offboard_test_base.cpp
   src/satellite_task.cpp

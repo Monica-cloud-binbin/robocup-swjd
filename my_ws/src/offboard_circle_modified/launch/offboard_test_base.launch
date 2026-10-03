@@ -2,18 +2,18 @@
 <launch>
     <!--
       mission_mode:
-        1 = takeoff -> avoidance to test target -> hold
-        2 = takeoff -> avoidance to yellow area -> yellow task -> avoidance home
-        3 = takeoff -> satellite task -> avoidance to yellow area
-            -> yellow task -> avoidance home
+        1 = 起飞 -> 避障飞向测试目标点 -> 悬停
+        2 = 起飞 -> 黄气球任务（内部调用避障）-> 避障返航
+        3 = 起飞 -> 卫星任务 -> 黄气球任务（内部调用避障）
+            -> 避障返航
 
-      Every x/y/z mission value below is an offset in metres from the first
-      valid /mavros/local_position/odom pose captured before takeoff.
-      These values are test defaults and must be tuned for the actual field.
+      下列任务坐标中的 x、y、z 均以起飞前首次取得的有效
+      /mavros/local_position/odom 位置为原点，单位为米。
+      所有参数值都只是测试默认值，必须根据实际场地和实机表现调整。
     -->
     <arg name="mission_mode" default="1" />
-    <arg name="satellite_class_name" default="" />
-    <arg name="yellow_balloon_class_name" default="" />
+    <arg name="satellite_class_name" default="black_ring" />
+    <arg name="yellow_balloon_class_name" default="yellow_balloon" />
 
     <node pkg="offboard_circle_modified"
           type="offboard_test_base"
@@ -21,30 +21,30 @@
           output="screen">
         <param name="mission_mode" type="int" value="$(arg mission_mode)" />
         <param name="auto_land_after_mission" type="bool" value="false" />
-        <param name="ALTITUDE" type="double" value="1.2" />
+        <param name="ALTITUDE" type="double" value="1.05" />
 
-        <!-- Exact YOLO model labels. Mode 1 does not require either value. -->
+        <!-- YOLO 模型中的准确类别名；模式 1 不需要填写这两个参数。 -->
         <param name="satellite_class_name" type="string"
                value="$(arg satellite_class_name)" />
         <param name="yellow_balloon_class_name" type="string"
                value="$(arg yellow_balloon_class_name)" />
 
-        <!-- Mode 1 destination, relative to takeoff origin. -->
-        <param name="test_goal_x" type="double" value="4.3" />
-        <param name="test_goal_y" type="double" value="3.9" />
+        <!-- 模式 1 的测试目标点，相对于起飞原点。 -->
+        <param name="test_goal_x" type="double" value="3.66" />
+        <param name="test_goal_y" type="double" value="4.70" />
 
-        <!-- Yellow task staging point, relative to takeoff origin. -->
-        <param name="yellow_balloon_x" type="double" value="4.3" />
-        <param name="yellow_balloon_y" type="double" value="3.9" />
-        <param name="yellow_balloon_altitude" type="double" value="1.2" />
+        <!-- 预先标定的黄气球中心位置，相对于起飞原点。 -->
+        <param name="yellow_balloon_x" type="double" value="3.66" />
+        <param name="yellow_balloon_y" type="double" value="4.70" />
+        <param name="yellow_balloon_altitude" type="double" value="1.05" />
 
-        <!-- Satellite center, relative to takeoff origin. -->
+        <!-- 卫星转台中心位置，相对于起飞原点。 -->
         <param name="satellite_x" type="double" value="4.0" />
         <param name="satellite_y" type="double" value="0.0" />
 
-        <!-- One fixed obstacle used by every avoidance leg. -->
-        <param name="obstacle_x" type="double" value="1.8" />
-        <param name="obstacle_y" type="double" value="3.9" />
+        <!-- 所有避障航段共用的单个固定障碍物及其安全圆参数。 -->
+        <param name="obstacle_x" type="double" value="1.38" />
+        <param name="obstacle_y" type="double" value="2.70" />
         <param name="obstacle_safe_distance" type="double" value="1.0" />
         <param name="avoidance_orbit_angle_deg" type="double" value="180.0" />
         <param name="avoidance_orbit_angular_speed" type="double" value="0.10" />
@@ -52,7 +52,7 @@
         <param name="arrive_tolerance" type="double" value="0.12" />
         <param name="orbit_tracking_tolerance" type="double" value="0.25" />
 
-        <!-- Satellite logic migrated from the current formal controller. -->
+        <!-- 从当前正式主控迁移的卫星寻找、接近和绕飞参数。 -->
         <param name="satellite_image_center_x" type="double" value="320.0" />
         <param name="satellite_kp_fast" type="double" value="0.00035" />
         <param name="satellite_kp_slow" type="double" value="0.00020" />
@@ -67,11 +67,33 @@
         <param name="satellite_detection_timeout" type="double" value="0.5" />
         <param name="satellite_detection_count_required" type="int" value="6" />
 
-        <!-- First yellow-module implementation: fresh, centered detections. -->
+        <!--
+          黄气球任务测试默认参数。高度均相对于起飞原点；
+          所有值都可通过 ROS 参数服务器在运行前调整。
+        -->
+        <param name="yellow_buffer_distance" type="double" value="1" />
+        <param name="yellow_search_yaw_rate" type="double" value="0.2" />
         <param name="yellow_image_center_x" type="double" value="320.0" />
         <param name="yellow_image_center_y" type="double" value="240.0" />
-        <param name="yellow_pixel_tolerance" type="double" value="60.0" />
+        <param name="yellow_alignment_tolerance_x" type="double" value="30.0" />
+        <param name="yellow_alignment_tolerance_y" type="double" value="30.0" />
+        <param name="yellow_alignment_count_required" type="int" value="5" />
+        <param name="yellow_yaw_kp" type="double" value="0.001" />
+        <param name="yellow_yaw_control_sign" type="double" value="-1.0" />
+        <param name="yellow_max_yaw_rate" type="double" value="0.25" />
+        <param name="yellow_vertical_kp" type="double" value="0.001" />
+        <param name="yellow_vertical_control_sign" type="double" value="-1.0" />
+        <param name="yellow_max_vertical_speed" type="double" value="0.20" />
+        <param name="yellow_min_altitude" type="double" value="0.5" />
+        <param name="yellow_max_altitude" type="double" value="2.5" />
         <param name="yellow_detection_timeout" type="double" value="0.5" />
-        <param name="yellow_detection_count_required" type="int" value="5" />
+        <param name="yellow_approach_speed" type="double" value="0.25" />
+        <param name="yellow_area_ratio_threshold" type="double" value="0.08" />
+        <param name="yellow_max_approach_distance" type="double" value="3.0" />
+        <param name="yellow_approach_timeout" type="double" value="20.0" />
+        <param name="yellow_contact_speed" type="double" value="0.25" />
+        <param name="yellow_contact_distance" type="double" value="0.5" />
+        <param name="yellow_contact_arrive_tolerance" type="double" value="0.12" />
+        <param name="yellow_contact_timeout" type="double" value="8.0" />
     </node>
 </launch>

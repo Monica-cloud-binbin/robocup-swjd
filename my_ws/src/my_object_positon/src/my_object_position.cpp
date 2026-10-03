@@ -2,9 +2,10 @@
 int asd;
 MoveObject::MoveObject() : it_(nh_)
 {
-    nh_.param<double>("~confidence_threshold", confidence_threshold_, 0.8);
-    nh_.param<int>("~image_width", image_width_, 640);
-    nh_.param<int>("~image_height", image_height_, 480);
+    ros::NodeHandle private_nh("~");
+    private_nh.param<double>("confidence_threshold", confidence_threshold_, 0.8);
+    private_nh.param<int>("image_width", image_width_, 640);
+    private_nh.param<int>("image_height", image_height_, 480);
 
     // 保留旧接口，供仍使用 PointStamped 的旧主控兼容。
     position_pub = nh_.advertise<geometry_msgs::PointStamped>("/object_position", 10);

@@ -147,8 +147,11 @@ void loadParameters(ros::NodeHandle& private_nh)
                              config.yellow_balloon_x, 4.3);
     private_nh.param<double>("yellow_balloon_y",
                              config.yellow_balloon_y, 3.9);
+    config.yellow.target_x_offset = config.yellow_balloon_x;
+    config.yellow.target_y_offset = config.yellow_balloon_y;
     private_nh.param<double>("yellow_balloon_altitude",
                              config.yellow_balloon_altitude, 1.2);
+    config.yellow.target_altitude_offset = config.yellow_balloon_altitude;
     private_nh.param<double>("satellite_x", config.satellite_x, 4.0);
     private_nh.param<double>("satellite_y", config.satellite_y, 0.0);
 
@@ -166,6 +169,7 @@ void loadParameters(ros::NodeHandle& private_nh)
                              config.avoidance.arrive_tolerance, 0.12);
     private_nh.param<double>("orbit_tracking_tolerance",
                              config.avoidance.orbit_tracking_tolerance, 0.25);
+    config.yellow.approach_avoidance = config.avoidance;
 
     private_nh.param<double>("satellite_image_center_x",
                              config.satellite.image_center_x, 320.0);
@@ -194,16 +198,54 @@ void loadParameters(ros::NodeHandle& private_nh)
     private_nh.param<int>("satellite_detection_count_required",
                           config.satellite.detection_count_required, 6);
 
+    private_nh.param<double>("yellow_buffer_distance",
+                             config.yellow.buffer_distance, 1.5);
+    private_nh.param<double>("yellow_search_yaw_rate",
+                             config.yellow.search_yaw_rate, 0.2);
     private_nh.param<double>("yellow_image_center_x",
                              config.yellow.image_center_x, 320.0);
     private_nh.param<double>("yellow_image_center_y",
                              config.yellow.image_center_y, 240.0);
-    private_nh.param<double>("yellow_pixel_tolerance",
-                             config.yellow.pixel_tolerance, 60.0);
+    private_nh.param<double>("yellow_alignment_tolerance_x",
+                             config.yellow.alignment_tolerance_x, 30.0);
+    private_nh.param<double>("yellow_alignment_tolerance_y",
+                             config.yellow.alignment_tolerance_y, 30.0);
+    private_nh.param<int>("yellow_alignment_count_required",
+                          config.yellow.alignment_count_required, 5);
+    private_nh.param<double>("yellow_yaw_kp",
+                             config.yellow.yaw_kp, 0.001);
+    private_nh.param<double>("yellow_yaw_control_sign",
+                             config.yellow.yaw_control_sign, -1.0);
+    private_nh.param<double>("yellow_max_yaw_rate",
+                             config.yellow.max_yaw_rate, 0.25);
+    private_nh.param<double>("yellow_vertical_kp",
+                             config.yellow.vertical_kp, 0.001);
+    private_nh.param<double>("yellow_vertical_control_sign",
+                             config.yellow.vertical_control_sign, -1.0);
+    private_nh.param<double>("yellow_max_vertical_speed",
+                             config.yellow.max_vertical_speed, 0.20);
+    private_nh.param<double>("yellow_min_altitude",
+                             config.yellow.min_altitude, 0.5);
+    private_nh.param<double>("yellow_max_altitude",
+                             config.yellow.max_altitude, 2.5);
     private_nh.param<double>("yellow_detection_timeout",
                              config.yellow.detection_timeout, 0.5);
-    private_nh.param<int>("yellow_detection_count_required",
-                          config.yellow.detection_count_required, 5);
+    private_nh.param<double>("yellow_approach_speed",
+                             config.yellow.approach_speed, 0.25);
+    private_nh.param<double>("yellow_area_ratio_threshold",
+                             config.yellow.area_ratio_threshold, 0.08);
+    private_nh.param<double>("yellow_max_approach_distance",
+                             config.yellow.max_approach_distance, 3.0);
+    private_nh.param<double>("yellow_approach_timeout",
+                             config.yellow.approach_timeout, 20.0);
+    private_nh.param<double>("yellow_contact_speed",
+                             config.yellow.contact_speed, 0.25);
+    private_nh.param<double>("yellow_contact_distance",
+                             config.yellow.contact_distance, 0.5);
+    private_nh.param<double>("yellow_contact_arrive_tolerance",
+                             config.yellow.contact_arrive_tolerance, 0.12);
+    private_nh.param<double>("yellow_contact_timeout",
+                             config.yellow.contact_timeout, 8.0);
 }
 
 bool validatePreflightParameters(std::string& error)
@@ -412,7 +454,9 @@ int main(int argc, char **argv)
     };
 
     MissionPhase phase = config.mission_mode == 3
-        ? START_SATELLITE : OUTBOUND_AVOIDANCE;
+        ? START_SATELLITE
+        : (config.mission_mode == 2 ? YELLOW_BALLOON
+                                    : OUTBOUND_AVOIDANCE);
     DesiredSetpoint command(
         init_position_x_take_off, init_position_y_take_off,
         init_position_z_take_off + ALTITUDE, yaw);
@@ -420,7 +464,6 @@ int main(int argc, char **argv)
         init_position_x_take_off + config.test_goal_x,
         init_position_y_take_off + config.test_goal_y,
         init_position_z_take_off + ALTITUDE, yaw);
-    const DesiredSetpoint yellow_goal = config.yellow.staging_setpoint;
     const DesiredSetpoint home_goal(
         init_position_x_take_off, init_position_y_take_off,
         init_position_z_take_off + ALTITUDE, yaw);
@@ -434,16 +477,23 @@ int main(int argc, char **argv)
             phase = FAILED_HOLD;
         }
     }
-    else
+    else if (config.mission_mode == 1)
     {
-        const DesiredSetpoint& target = config.mission_mode == 1
-            ? test_goal : yellow_goal;
-        if (!avoidance_task.start(vehicle, target,
+        if (!avoidance_task.start(vehicle, test_goal,
                                   config.avoidance.orbit_direction, error))
         {
             ROS_ERROR("Outbound avoidance start failed: %s", error.c_str());
             phase = FAILED_HOLD;
         }
+    }
+    else if (!yellow_task.start(vehicle, error))
+    {
+        ROS_ERROR("Yellow balloon task failed to start: %s", error.c_str());
+        phase = FAILED_HOLD;
+    }
+    else
+    {
+        ROS_INFO("Mode 2 started the yellow balloon module directly.");
     }
 
     bool land_mode_sent = false;
@@ -471,16 +521,14 @@ int main(int argc, char **argv)
             }
             if (update.status == TaskStatus::SUCCEEDED)
             {
-                if (avoidance_task.start(
-                        vehicle, yellow_goal,
-                        config.avoidance.orbit_direction, error))
+                if (yellow_task.start(vehicle, error))
                 {
-                    phase = OUTBOUND_AVOIDANCE;
-                    ROS_INFO("Satellite module complete. Starting avoidance to yellow area.");
+                    phase = YELLOW_BALLOON;
+                    ROS_INFO("Satellite module complete. Starting yellow balloon module directly.");
                 }
                 else
                 {
-                    ROS_ERROR("Avoidance after satellite failed to start: %s",
+                    ROS_ERROR("Yellow balloon task after satellite failed to start: %s",
                               error.c_str());
                     phase = FAILED_HOLD;
                 }
@@ -500,22 +548,8 @@ int main(int argc, char **argv)
             }
             if (update.status == TaskStatus::SUCCEEDED)
             {
-                if (config.mission_mode == 1)
-                {
-                    phase = HOLD;
-                    ROS_INFO("Mode 1 obstacle test complete. Holding at test target.");
-                }
-                else if (yellow_task.start(vehicle, error))
-                {
-                    phase = YELLOW_BALLOON;
-                    ROS_INFO("Yellow area reached. Starting yellow balloon module.");
-                }
-                else
-                {
-                    ROS_ERROR("Yellow balloon task failed to start: %s",
-                              error.c_str());
-                    phase = FAILED_HOLD;
-                }
+                phase = HOLD;
+                ROS_INFO("Mode 1 obstacle test complete. Holding at test target.");
             }
             else if (update.status == TaskStatus::FAILED)
             {

@@ -130,47 +130,88 @@ bool AvoidanceTask::start(const VehicleState& vehicle,
         return true;
     }
 
-    const double dx = config_.obstacle_x - vehicle.x;
-    const double dy = config_.obstacle_y - vehicle.y;
-    const double distance_to_center = std::hypot(dx, dy);
-    if (distance_to_center < 1e-6)
+    const double dx = target_.x - vehicle.x;
+    const double dy = target_.y - vehicle.y;
+    const double a = dx * dx + dy * dy;
+    if (a < 1e-12)
     {
-        error = "cannot calculate obstacle approach direction";
+        error = "cannot calculate avoidance intersections: start and target "
+                "are too close";
         stage_ = FAILED;
         return false;
     }
 
-    approach_x_ = config_.obstacle_x -
-        dx / distance_to_center * config_.safety_radius;
-    approach_y_ = config_.obstacle_y -
-        dy / distance_to_center * config_.safety_radius;
+    const double fx = vehicle.x - config_.obstacle_x;
+    const double fy = vehicle.y - config_.obstacle_y;
+    const double b = 2.0 * (fx * dx + fy * dy);
+    const double c = fx * fx + fy * fy -
+        config_.safety_radius * config_.safety_radius;
+    double discriminant = b * b - 4.0 * a * c;
+    const double discriminant_tolerance = 1e-10 * std::max(
+        1.0, b * b + std::fabs(4.0 * a * c));
+    if (discriminant < -discriminant_tolerance)
+    {
+        error = "cannot calculate avoidance intersections: line and safety "
+                "circle do not intersect";
+        stage_ = FAILED;
+        return false;
+    }
+    if (discriminant < 0.0)
+    {
+        discriminant = 0.0;
+    }
+
+    const double sqrt_discriminant = std::sqrt(discriminant);
+    double t1 = (-b - sqrt_discriminant) / (2.0 * a);
+    double t2 = (-b + sqrt_discriminant) / (2.0 * a);
+    if (t1 > t2)
+    {
+        std::swap(t1, t2);
+    }
+
+    const double segment_tolerance = 1e-9;
+    if (t1 < -segment_tolerance || t1 > 1.0 + segment_tolerance ||
+        t2 < -segment_tolerance || t2 > 1.0 + segment_tolerance ||
+        t2 - t1 < segment_tolerance)
+    {
+        error = "cannot calculate two valid avoidance intersections on the "
+                "start-to-target segment";
+        stage_ = FAILED;
+        return false;
+    }
+    t1 = std::max(0.0, std::min(1.0, t1));
+    t2 = std::max(0.0, std::min(1.0, t2));
+
+    const double entry_x = vehicle.x + t1 * dx;
+    const double entry_y = vehicle.y + t1 * dy;
+    const double exit_x = vehicle.x + t2 * dx;
+    const double exit_y = vehicle.y + t2 * dy;
+
+    approach_x_ = entry_x;
+    approach_y_ = entry_y;
     orbit_start_theta_ = std::atan2(
         approach_y_ - config_.obstacle_y,
         approach_x_ - config_.obstacle_x);
 
-    double planned_angle = std::fabs(config_.orbit_angle_deg) * kPi / 180.0;
-    const double one_degree = kPi / 180.0;
-    const double maximum_angle = planned_angle + 2.0 * kPi;
-    while (planned_angle <= maximum_angle)
+    double exit_theta = std::atan2(
+        exit_y - config_.obstacle_y,
+        exit_x - config_.obstacle_x);
+    if (direction_ > 0)
     {
-        const double candidate_theta = orbit_start_theta_ +
-            static_cast<double>(direction_) * planned_angle;
-        const double exit_x = config_.obstacle_x +
-            config_.safety_radius * std::cos(candidate_theta);
-        const double exit_y = config_.obstacle_y +
-            config_.safety_radius * std::sin(candidate_theta);
-        const double outward_dot =
-            (target_.x - exit_x) * (exit_x - config_.obstacle_x) +
-            (target_.y - exit_y) * (exit_y - config_.obstacle_y);
-        if (outward_dot >= -1e-6)
+        while (exit_theta <= orbit_start_theta_)
         {
-            break;
+            exit_theta += 2.0 * kPi;
         }
-        planned_angle += one_degree;
+    }
+    else
+    {
+        while (exit_theta >= orbit_start_theta_)
+        {
+            exit_theta -= 2.0 * kPi;
+        }
     }
 
-    orbit_target_theta_ = orbit_start_theta_ +
-        static_cast<double>(direction_) * planned_angle;
+    orbit_target_theta_ = exit_theta;
     orbit_theta_ = orbit_start_theta_;
     stage_ = APPROACH;
     last_update_time_ = ros::Time(0);
@@ -178,9 +219,11 @@ bool AvoidanceTask::start(const VehicleState& vehicle,
 
     ROS_WARN("Avoidance required: path minimum distance %.3f m, safety "
              "radius %.3f m.", path_min_distance_, config_.safety_radius);
-    ROS_INFO("Approach point=(%.3f, %.3f), planned arc=%.1f deg, "
-             "direction=%s.", approach_x_, approach_y_,
-             planned_angle * 180.0 / kPi,
+    ROS_INFO("Avoidance intersections: entry=(%.3f, %.3f), "
+             "exit=(%.3f, %.3f), t1=%.6f, t2=%.6f.",
+             entry_x, entry_y, exit_x, exit_y, t1, t2);
+    ROS_INFO("Orbit angles: start=%.6f rad, target=%.6f rad, direction=%s.",
+             orbit_start_theta_, orbit_target_theta_,
              direction_ > 0 ? "CCW" : "CW");
     return true;
 }
